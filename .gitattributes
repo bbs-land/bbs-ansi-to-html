@@ -1,0 +1,5 @@
+# Mark certain plain-text-ish extensions as binary to preserve raw bytes
+*.ans binary
+*.asc binary
+*.msg binary
+*.txt binary

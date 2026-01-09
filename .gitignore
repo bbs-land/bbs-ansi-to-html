@@ -1,0 +1,63 @@
+
+# Claude AI settings
+.claude/settings.local.json
+
+# --- Rust ---
+# Build output
+/target/
+**/target/
+
+# Compiled artifacts
+*.rlib
+*.so
+*.dylib
+*.dll
+
+# --- Deno ---
+# Deno local cache and build info
+/.deno/
+**/.deno/
+*.tsbuildinfo
+
+# --- Node / JavaScript / TypeScript ---
+# Node modules
+**/node_modules/
+/node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build output
+/dist/
+**/dist/
+/build/
+**/build/
+/lib/
+**/lib/
+
+# TypeScript incremental
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor / OS files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Misc
+.cache/
+coverage/
+/.parcel-cache/
+**/.parcel-cache/
+
+# Vite
+.vite/
+**/.vite/
