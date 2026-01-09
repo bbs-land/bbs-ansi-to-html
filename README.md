@@ -2,6 +2,8 @@
 
 Convert CP437 ANSI art files to HTML with custom web components.
 
+**[Live Demo](https://bbs-land.github.io/bbs-ansi-to-html/)** (TypeScript Version)
+
 ## Overview
 
 This mono-repo provides tools for converting BBS-style ANSI art files (with Code Page 437 encoding) into HTML that can be displayed in modern web browsers. It supports standard ANSI escape sequences as well as BBS-specific color codes from Synchronet and Renegade BBS software.

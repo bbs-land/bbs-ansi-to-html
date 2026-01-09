@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES3",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "lib": ["ES5", "ES2015", "DOM", "WebWorker"],
+    "declaration": false,
+    "sourceMap": false,
+    "downlevelIteration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

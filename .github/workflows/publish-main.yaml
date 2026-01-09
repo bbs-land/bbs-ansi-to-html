@@ -1,0 +1,41 @@
+name: publish-main
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get repository name only
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY#*/}" >> $GITHUB_ENV
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: 2.x
+
+      - name: Build web site
+        working-directory: projects/typescript/web
+        run: |
+          echo "Building site..."
+          deno task build
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          #github_token: ${{ github.token }}
+          publish_dir: ./projects/typescript/web/dist
+          publish_branch: gh-pages
+          commit_message: "chore: publish site from workflow"

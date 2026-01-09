@@ -1,0 +1,16 @@
+{
+  "name": "@bbs/ansi-to-html",
+  "version": "0.1.0",
+  "exports": "./src/index.ts",
+  "tasks": {
+    "test": "deno test --allow-read src/",
+    "check": "deno check src/index.ts",
+    "fmt": "deno fmt src/",
+    "lint": "deno lint src/"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  }
+}

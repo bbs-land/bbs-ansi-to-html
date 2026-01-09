@@ -1,0 +1,9 @@
+[package]
+name = "ansi-to-html-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Convert CP437 ANSI art files to HTML with custom web components"
+
+[dependencies]

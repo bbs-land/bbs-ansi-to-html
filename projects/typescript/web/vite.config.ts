@@ -1,4 +1,4 @@
-import { defineConfig } from 'npm:vite@^6.0.0';
+import { defineConfig, loadEnv } from 'npm:vite@^6.0.0';
 import react from 'npm:@vitejs/plugin-react@^4.3.4';
 import * as path from 'jsr:@std/path';
 
@@ -75,7 +75,8 @@ const port = parseInt(
   10,
 );
 
-export default defineConfig({
+const baseConfig = {
+  // base: '/bbs-ansi-to-html/',
   plugins: [react()],
   publicDir: wwwrootPath,
   server: {
@@ -95,4 +96,20 @@ export default defineConfig({
       ),
     },
   },
+};
+
+export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, Deno.cwd(), '');
+
+  if (env.REPO_NAME) {
+    return Object.assign(
+      {}, 
+      baseConfig, 
+      {
+        base: `/${env.REPO_NAME}/`
+      }
+    );
+  }
+
+  return baseConfig;
 });

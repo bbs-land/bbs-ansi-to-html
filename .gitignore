@@ -7,7 +7,7 @@
 /target/
 **/target/
 
-# Compiled artifacts
+# Compiled
 *.rlib
 *.so
 *.dylib
@@ -35,8 +35,6 @@ pnpm-debug.log*
 **/dist/
 /build/
 **/build/
-/lib/
-**/lib/
 
 # TypeScript incremental
 *.tsbuildinfo
