@@ -27,7 +27,7 @@ deno task lint    # Lint code
 
 ```bash
 cd web
-deno task dev     # Start dev server (default: http://localhost:3000)
+deno task dev     # Start dev server (default: http://localhost:3100)
 deno task build   # Build for production
 deno task preview # Preview production build
 ```
@@ -44,7 +44,7 @@ deno task preview # Preview production build
 
 ### Environment Variables
 
-- `HTTP_PORT` or `PORT` - Server port (default: 3000)
+- `HTTP_PORT` or `PORT` - Server port (default: 3100)
 - `WWWROOT` - Static files directory
 
 ### wwwroot Lookup Order

@@ -41,7 +41,7 @@ cd projects/typescript/web
 deno task dev
 ```
 
-Then open http://localhost:5173 in your browser.
+Then open http://localhost:3100 in your browser.
 
 ## Project Structure
 

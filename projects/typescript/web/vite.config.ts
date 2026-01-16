@@ -71,7 +71,7 @@ const wwwrootPath = getWwwrootPath();
 console.log(`Using wwwroot: ${wwwrootPath}`);
 
 const port = parseInt(
-  Deno.env.get('HTTP_PORT') || Deno.env.get('PORT') || '3000',
+  Deno.env.get('HTTP_PORT') || Deno.env.get('PORT') || '3100',
   10,
 );
 
