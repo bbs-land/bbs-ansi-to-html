@@ -276,7 +276,7 @@ struct Converter {
     background: u8,
     output: String,
     current_column: u32,
-    line_has_ansi: bool,
+    has_encountered_ansi: bool,
     save_position_active: bool,
     parse_state: ParseState,
     csi_params: String,
@@ -290,7 +290,7 @@ impl Converter {
             background: 0,  // Black
             output: String::new(),
             current_column: 0,
-            line_has_ansi: false,
+            has_encountered_ansi: false,
             save_position_active: false,
             parse_state: ParseState::Normal,
             csi_params: String::new(),
@@ -332,8 +332,8 @@ impl Converter {
             return;
         }
 
-        // Check for soft return at column 80
-        if self.line_has_ansi && self.current_column >= 80 && ch != '\n' {
+        // Check for soft return at column 80 (only for CP437 mode with ANSI sequences)
+        if !self.options.utf8_input && self.has_encountered_ansi && self.current_column >= 80 && ch != '\n' {
             self.output.push('\n');
             self.current_column = 0;
         }
@@ -347,7 +347,7 @@ impl Converter {
             '\n' => {
                 self.output.push('\n');
                 self.current_column = 0;
-                self.line_has_ansi = false;
+                // Note: has_encountered_ansi is NOT reset - it's a file-level flag
             }
             '\r' => {
                 // Suppress carriage returns
@@ -483,7 +483,7 @@ impl Converter {
     }
 
     fn process_csi(&mut self, params: &str, command: char) {
-        self.line_has_ansi = true;
+        self.has_encountered_ansi = true;
 
         match command {
             'm' => {
@@ -532,7 +532,7 @@ impl Converter {
 
     /// Process Synchronet Ctrl-A color code
     fn process_synchronet_code(&mut self, code: u8) {
-        self.line_has_ansi = true;
+        self.has_encountered_ansi = true;
         let mut new_fg = self.foreground;
         let mut new_bg = self.background;
 
@@ -586,7 +586,7 @@ impl Converter {
 
     /// Process Renegade pipe color code (0-23)
     fn process_renegade_code(&mut self, code: u8) {
-        self.line_has_ansi = true;
+        self.has_encountered_ansi = true;
         let mut new_fg = self.foreground;
         let mut new_bg = self.background;
 
@@ -659,13 +659,13 @@ impl Converter {
                     b'7' => {
                         // \e7 - Save cursor position (DEC)
                         self.save_position_active = true;
-                        self.line_has_ansi = true;
+                        self.has_encountered_ansi = true;
                         self.parse_state = ParseState::Normal;
                     }
                     b'8' => {
                         // \e8 - Restore cursor position (DEC)
                         self.save_position_active = false;
-                        self.line_has_ansi = true;
+                        self.has_encountered_ansi = true;
                         self.parse_state = ParseState::Normal;
                     }
                     _ => {
@@ -871,12 +871,12 @@ impl Converter {
                     }
                     '7' => {
                         self.save_position_active = true;
-                        self.line_has_ansi = true;
+                        self.has_encountered_ansi = true;
                         self.parse_state = ParseState::Normal;
                     }
                     '8' => {
                         self.save_position_active = false;
-                        self.line_has_ansi = true;
+                        self.has_encountered_ansi = true;
                         self.parse_state = ParseState::Normal;
                     }
                     _ => {

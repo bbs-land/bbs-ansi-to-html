@@ -197,7 +197,7 @@ class Converter {
   private background = 0;  // Black
   private output = '';
   private currentColumn = 0;
-  private lineHasAnsi = false;
+  private hasEncounteredAnsi = false;
   private savePositionActive = false;
   private parseState: ParseState = ParseState.Normal;
   private csiParams = '';
@@ -238,8 +238,8 @@ class Converter {
       return;
     }
 
-    // Check for soft return at column 80
-    if (this.lineHasAnsi && this.currentColumn >= 80 && ch !== '\n') {
+    // Check for soft return at column 80 (only for CP437 mode with ANSI sequences)
+    if (!this.options.utf8Input && this.hasEncounteredAnsi && this.currentColumn >= 80 && ch !== '\n') {
       this.output += '\n';
       this.currentColumn = 0;
     }
@@ -268,7 +268,7 @@ class Converter {
       case '\n':
         this.output += '\n';
         this.currentColumn = 0;
-        this.lineHasAnsi = false;
+        // Note: hasEncounteredAnsi is NOT reset - it's a file-level flag
         break;
       case '\r':
         // Suppress carriage returns
@@ -350,7 +350,7 @@ class Converter {
   }
 
   private processCsi(params: string, command: string): void {
-    this.lineHasAnsi = true;
+    this.hasEncounteredAnsi = true;
 
     switch (command) {
       case 'm':
@@ -400,7 +400,7 @@ class Converter {
   }
 
   private processSynchronetCode(code: number): void {
-    this.lineHasAnsi = true;
+    this.hasEncounteredAnsi = true;
     let newFg = this.foreground;
     let newBg = this.background;
 
@@ -463,7 +463,7 @@ class Converter {
   }
 
   private processRenegadeCode(code: number): void {
-    this.lineHasAnsi = true;
+    this.hasEncounteredAnsi = true;
     let newFg = this.foreground;
     let newBg = this.background;
 
@@ -506,11 +506,11 @@ class Converter {
           this.csiParams = '';
         } else if (charCode === 0x37) { // '7' - Save cursor position (DEC)
           this.savePositionActive = true;
-          this.lineHasAnsi = true;
+          this.hasEncounteredAnsi = true;
           this.parseState = ParseState.Normal;
         } else if (charCode === 0x38) { // '8' - Restore cursor position (DEC)
           this.savePositionActive = false;
-          this.lineHasAnsi = true;
+          this.hasEncounteredAnsi = true;
           this.parseState = ParseState.Normal;
         } else {
           this.parseState = ParseState.Normal;
@@ -596,11 +596,11 @@ class Converter {
           this.csiParams = '';
         } else if (ch === '7') {
           this.savePositionActive = true;
-          this.lineHasAnsi = true;
+          this.hasEncounteredAnsi = true;
           this.parseState = ParseState.Normal;
         } else if (ch === '8') {
           this.savePositionActive = false;
-          this.lineHasAnsi = true;
+          this.hasEncounteredAnsi = true;
           this.parseState = ParseState.Normal;
         } else {
           this.parseState = ParseState.Normal;
