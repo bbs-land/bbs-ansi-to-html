@@ -91,6 +91,7 @@ Core library for converting CP437 byte arrays with ANSI/BBS escape sequences to 
   - **Renegade pipe codes**: `|00`-`|07` (foreground), `|08`-`|15` (bright), `|16`-`|23` (background)
 - **Soft line wrapping**: Lines with ANSI sequences wrap at column 80
 - **UTF-8 input mode** (optional, via `ConvertOptions`): Treats input as UTF-8 instead of CP437, only converting control characters (< 0x20)
+- **SAUCE metadata handling**: Parses SAUCE/COMNT records and displays metadata as `Key: Value` lines (Title, Author, Group, Date, Size, Font, Comment). Content after SAUCE records continues to be processed.
 - **HTML output**: Results wrapped in `<pre class="ansi">` with `<ans-kf>` custom elements (lowercase hex)
 
 #### Public API

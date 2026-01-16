@@ -21,6 +21,129 @@ export interface ConvertOptions {
 }
 
 /**
+ * SAUCE record data (Standard Architecture for Universal Comment Extensions)
+ */
+interface SauceRecord {
+  title: string;
+  author: string;
+  group: string;
+  date: string;
+  width: number;
+  height: number;
+  comments: string[];
+  font: string;
+}
+
+/**
+ * Decode a CP437 byte field to string, trimming trailing spaces/nulls
+ */
+function decodeField(input: string, start: number, length: number): string {
+  let result = '';
+  for (let i = start; i < start + length && i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    result += CP437_TO_UNICODE[code] ?? String.fromCharCode(code);
+  }
+  return result.replace(/[\s\0]+$/, '');
+}
+
+/**
+ * Parse SAUCE record from input string starting at given position
+ */
+function parseSauceRecord(input: string, saucePos: number, comntPos: number | null): SauceRecord | null {
+  if (saucePos + 128 > input.length) return null;
+
+  const id = input.slice(saucePos, saucePos + 5);
+  if (id !== 'SAUCE') return null;
+
+  const record: SauceRecord = {
+    title: decodeField(input, saucePos + 7, 35),
+    author: decodeField(input, saucePos + 42, 20),
+    group: decodeField(input, saucePos + 62, 20),
+    date: decodeField(input, saucePos + 82, 8),
+    width: input.charCodeAt(saucePos + 96) | (input.charCodeAt(saucePos + 97) << 8),
+    height: input.charCodeAt(saucePos + 98) | (input.charCodeAt(saucePos + 99) << 8),
+    comments: [],
+    font: decodeField(input, saucePos + 106, 22),
+  };
+
+  // Parse COMNT block if present
+  if (comntPos !== null && comntPos < saucePos) {
+    const comntId = input.slice(comntPos, comntPos + 5);
+    if (comntId === 'COMNT') {
+      const commentData = input.slice(comntPos + 5, saucePos);
+      // Each comment line is 64 characters
+      for (let i = 0; i < commentData.length; i += 64) {
+        const line = decodeField(commentData, i, 64);
+        if (line) {
+          record.comments.push(line);
+        }
+      }
+    }
+  }
+
+  return record;
+}
+
+/**
+ * Format SAUCE record as "Key: Value\n" lines
+ */
+function formatSauceOutput(sauce: SauceRecord): string {
+  let output = '';
+
+  if (sauce.title) {
+    output += `Title: ${sauce.title}\n`;
+  }
+  if (sauce.author) {
+    output += `Author: ${sauce.author}\n`;
+  }
+  if (sauce.group) {
+    output += `Group: ${sauce.group}\n`;
+  }
+  if (sauce.date) {
+    // Format date from CCYYMMDD to CCYY-MM-DD if valid
+    if (sauce.date.length === 8 && /^\d{8}$/.test(sauce.date)) {
+      output += `Date: ${sauce.date.slice(0, 4)}-${sauce.date.slice(4, 6)}-${sauce.date.slice(6, 8)}\n`;
+    } else {
+      output += `Date: ${sauce.date}\n`;
+    }
+  }
+  if (sauce.width > 0 || sauce.height > 0) {
+    output += `Size: ${sauce.width}x${sauce.height}\n`;
+  }
+  if (sauce.font) {
+    output += `Font: ${sauce.font}\n`;
+  }
+  for (const comment of sauce.comments) {
+    output += `Comment: ${comment}\n`;
+  }
+
+  return output;
+}
+
+/**
+ * Find SAUCE record position and COMNT block in input
+ * Returns [saucePos, comntPos, afterSaucePos] or [null, null, null]
+ */
+function findSaucePositions(input: string): [number | null, number | null, number | null] {
+  // Search for SAUCE00 marker
+  const saucePos = input.lastIndexOf('SAUCE00');
+  if (saucePos === -1) {
+    return [null, null, null];
+  }
+
+  // Look for COMNT before SAUCE
+  const searchStart = Math.max(0, saucePos - (64 * 256 + 5));
+  const searchArea = input.slice(searchStart, saucePos);
+  const comntRelPos = searchArea.lastIndexOf('COMNT');
+  const comntPos = comntRelPos !== -1 ? searchStart + comntRelPos : null;
+
+  // Position after SAUCE record
+  const afterSaucePos = saucePos + 128;
+
+  return [saucePos, comntPos, afterSaucePos];
+}
+
+/**
  * Parser state for ANSI escape sequences.
  */
 const enum ParseState {
@@ -136,6 +259,10 @@ class Converter {
         break;
       case '"':
         this.output += '&quot;';
+        this.currentColumn++;
+        break;
+      case "'":
+        this.output += '&apos;';
         this.currentColumn++;
         break;
       case '\n':
@@ -535,8 +662,67 @@ class Converter {
     this.output = '<pre class="ansi">';
     this.openTag();
 
+    // Find SUB marker and SAUCE positions
+    let subPos = -1;
     for (let i = 0; i < input.length; i++) {
+      if (input.charCodeAt(i) === 0x1A) {
+        subPos = i;
+        break;
+      }
+    }
+    const [saucePos, comntPos, afterSaucePos] = findSaucePositions(input);
+
+    // Determine content end position
+    const contentEnd = subPos !== -1 ? subPos :
+                       comntPos !== null ? comntPos :
+                       saucePos !== null ? saucePos :
+                       input.length;
+
+    // Process content before SUB/SAUCE
+    for (let i = 0; i < contentEnd; i++) {
       this.processCharCode(input.charCodeAt(i));
+    }
+
+    // If SAUCE record exists, parse and output it
+    if (saucePos !== null) {
+      const sauce = parseSauceRecord(input, saucePos, comntPos);
+      if (sauce) {
+        const sauceOutput = formatSauceOutput(sauce);
+        if (sauceOutput) {
+          // Add newline before SAUCE metadata
+          this.emitChar('\n');
+          for (const ch of sauceOutput) {
+            this.emitChar(ch);
+          }
+        }
+      }
+
+      // Check for content after SAUCE record
+      if (afterSaucePos !== null && afterSaucePos < input.length) {
+        const remaining = input.slice(afterSaucePos);
+        // Check if there's meaningful content (not just nulls/SUBs)
+        let hasMeaningfulContent = false;
+        for (let i = 0; i < remaining.length; i++) {
+          const code = remaining.charCodeAt(i);
+          if (code !== 0 && code !== 0x1A) {
+            hasMeaningfulContent = true;
+            break;
+          }
+        }
+
+        if (hasMeaningfulContent) {
+          // Add newline separator before continuing content
+          this.emitChar('\n');
+          for (let i = 0; i < remaining.length; i++) {
+            const charCode = remaining.charCodeAt(i);
+            if (charCode === 0x1A) {
+              // Another SUB - stop processing
+              break;
+            }
+            this.processCharCode(charCode);
+          }
+        }
+      }
     }
 
     this.closeTag();
@@ -553,8 +739,59 @@ class Converter {
     this.output = '<pre class="ansi">';
     this.openTag();
 
-    for (const ch of input) {
+    // Find SUB marker and SAUCE positions
+    const subPos = input.indexOf('\x1A');
+    const [saucePos, comntPos, afterSaucePos] = findSaucePositions(input);
+
+    // Determine content end position
+    const contentEnd = subPos !== -1 ? subPos :
+                       comntPos !== null ? comntPos :
+                       saucePos !== null ? saucePos :
+                       input.length;
+
+    // Process content before SUB/SAUCE
+    for (const ch of input.slice(0, contentEnd)) {
       this.processUtf8Char(ch);
+    }
+
+    // If SAUCE record exists, parse and output it
+    if (saucePos !== null) {
+      const sauce = parseSauceRecord(input, saucePos, comntPos);
+      if (sauce) {
+        const sauceOutput = formatSauceOutput(sauce);
+        if (sauceOutput) {
+          // Add newline before SAUCE metadata
+          this.emitChar('\n');
+          for (const ch of sauceOutput) {
+            this.emitChar(ch);
+          }
+        }
+      }
+
+      // Check for content after SAUCE record
+      if (afterSaucePos !== null && afterSaucePos < input.length) {
+        const remaining = input.slice(afterSaucePos);
+        // Check if there's meaningful content (not just nulls/SUBs)
+        let hasMeaningfulContent = false;
+        for (const ch of remaining) {
+          const code = ch.charCodeAt(0);
+          if (code !== 0 && code !== 0x1A) {
+            hasMeaningfulContent = true;
+            break;
+          }
+        }
+
+        if (hasMeaningfulContent) {
+          // Add newline separator before continuing content
+          this.emitChar('\n');
+          for (const ch of remaining) {
+            if (ch === '\x1A') {
+              break;
+            }
+            this.processUtf8Char(ch);
+          }
+        }
+      }
     }
 
     this.closeTag();

@@ -122,7 +122,7 @@ Where `K` is the background color and `F` is the foreground color (lowercase hex
 
 - CP437 to Unicode conversion (all 256 characters)
 - Soft line wrapping at column 80 for ANSI content
-- HTML escaping for special characters (`<`, `>`, `&`, `"`)
+- HTML escaping for special characters (`<`, `>`, `&`, `"`, `'`)
 - Carriage return suppression, newline preservation
 
 ## CGA Color Palette

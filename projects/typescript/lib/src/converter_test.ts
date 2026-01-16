@@ -13,6 +13,12 @@ Deno.test('ansiToHtml - converts basic text', () => {
 Deno.test('ansiToHtml - escapes HTML special characters', () => {
   const result = ansiToHtml('<script>&</script>');
   assertStringIncludes(result, '&lt;script&gt;&amp;&lt;/script&gt;');
+  // Test double quote
+  const result2 = ansiToHtml('"quoted"');
+  assertStringIncludes(result2, '&quot;quoted&quot;');
+  // Test apostrophe
+  const result3 = ansiToHtml("it's here");
+  assertStringIncludes(result3, "it&apos;s here");
 });
 
 Deno.test('ansiToHtml - handles color changes', () => {
@@ -243,6 +249,104 @@ Deno.test('UTF-8 - handles Renegade codes with UTF-8 text', () => {
   assertStringIncludes(result, '<ans-04>'); // Red
   assertStringIncludes(result, '<ans-02>'); // Green
   assertStringIncludes(result, 'Grün'); // German umlaut preserved
+});
+
+// SAUCE metadata parsing tests
+
+// Helper to create a valid 128-byte SAUCE record
+function createSauceRecord(fields: {
+  title?: string;
+  author?: string;
+  group?: string;
+  date?: string;
+  width?: number;
+  height?: number;
+  font?: string;
+}): string {
+  const pad = (s: string, len: number) => s.padEnd(len, ' ').slice(0, len);
+  const padNull = (s: string, len: number) => s.padEnd(len, '\0').slice(0, len);
+
+  let record = 'SAUCE00';                                    // 7 bytes
+  record += pad(fields.title || '', 35);                     // 35 bytes
+  record += pad(fields.author || '', 20);                    // 20 bytes
+  record += pad(fields.group || '', 20);                     // 20 bytes
+  record += pad(fields.date || '', 8);                       // 8 bytes
+  record += '\0\0\0\0';                                      // 4 bytes filesize
+  record += '\x01\x01';                                      // 2 bytes datatype, filetype
+  // TInfo1-4: width (2), height (2), zeros (4)
+  const w = fields.width || 0;
+  const h = fields.height || 0;
+  record += String.fromCharCode(w & 0xFF, (w >> 8) & 0xFF);
+  record += String.fromCharCode(h & 0xFF, (h >> 8) & 0xFF);
+  record += '\0\0\0\0';                                      // 4 bytes tinfo3-4
+  record += '\0';                                            // 1 byte comments
+  record += '\0';                                            // 1 byte tflags
+  record += padNull(fields.font || '', 22);                  // 22 bytes tinfos
+  return record;
+}
+
+Deno.test('SUB without SAUCE - stops processing', () => {
+  // SUB without valid SAUCE record - content after SUB is ignored
+  const input = 'Visible\x1aRandom garbage after SUB';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, 'Visible');
+  assertEquals(result.includes('Random'), false);
+  assertEquals(result.includes('garbage'), false);
+});
+
+Deno.test('SAUCE record - parsed and displayed', () => {
+  const sauce = createSauceRecord({
+    title: 'Test Title',
+    author: 'Test Author',
+    group: 'Test Group',
+    date: '20240115',
+    width: 80,
+    height: 25,
+    font: 'IBM VGA',
+  });
+  const input = 'Content before SAUCE\x1a' + sauce;
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, 'Content before SAUCE');
+  assertStringIncludes(result, 'Title: Test Title');
+  assertStringIncludes(result, 'Author: Test Author');
+  assertStringIncludes(result, 'Group: Test Group');
+  assertStringIncludes(result, 'Date: 2024-01-15');
+  assertStringIncludes(result, 'Size: 80x25');
+  assertStringIncludes(result, 'Font: IBM VGA');
+});
+
+Deno.test('SAUCE with COMNT block', () => {
+  // Create COMNT block (5 bytes header + 64-byte comment line)
+  const comment = 'This is a comment line for the ANSI art.'.padEnd(64, ' ');
+  const comnt = 'COMNT' + comment;
+  const sauce = createSauceRecord({
+    title: 'Artwork Title',
+    author: 'Artist',
+  });
+  const input = 'Art content\x1a' + comnt + sauce;
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, 'Art content');
+  assertStringIncludes(result, 'Title: Artwork Title');
+  assertStringIncludes(result, 'Author: Artist');
+  assertStringIncludes(result, 'Comment: This is a comment line for the ANSI art.');
+});
+
+Deno.test('Content after SAUCE - continues parsing', () => {
+  const sauce = createSauceRecord({ title: 'Title' });
+  const input = 'Before SAUCE\x1a' + sauce + 'Content after SAUCE record';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, 'Before SAUCE');
+  assertStringIncludes(result, 'Title: Title');
+  assertStringIncludes(result, 'Content after SAUCE record');
+});
+
+Deno.test('SAUCE UTF-8 mode', () => {
+  const utf8Options: ConvertOptions = { utf8Input: true };
+  const sauce = createSauceRecord({ title: 'UTF-8 Test' });
+  const input = 'Hello UTF-8 é\x1a' + sauce;
+  const result = ansiToHtml(input, utf8Options);
+  assertStringIncludes(result, 'Hello UTF-8 é');
+  assertStringIncludes(result, 'Title: UTF-8 Test');
 });
 
 // CSS and JS are provided as static assets in the repository `wwwroot/`.

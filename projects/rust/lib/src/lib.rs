@@ -35,10 +35,15 @@
 //!
 //! - **Soft returns**: Lines containing ANSI/BBS sequences automatically wrap at column 80.
 //!
+//! - **SAUCE metadata handling**: Parses SAUCE/COMNT records commonly appended to ANSI art
+//!   files and displays metadata as `Key: Value` lines (Title, Author, Group, Date, Size,
+//!   Font, Comment). Content after SAUCE records continues to be processed, allowing for
+//!   BBS messages that contain ANSI art followed by additional text.
+//!
 //! - **Character handling**:
 //!   - Carriage returns (`\r`) are suppressed
 //!   - Newlines (`\n`) are preserved
-//!   - HTML special characters (`<`, `>`, `&`, `"`) are escaped
+//!   - HTML special characters (`<`, `>`, `&`, `"`, `'`) are escaped
 //!
 //! ## CGA Color Palette
 //!
@@ -117,6 +122,138 @@ pub struct ConvertOptions {
     pub renegade_pipe: bool,
     /// Treat input as UTF-8 instead of CP437 (only convert control chars < 0x20)
     pub utf8_input: bool,
+}
+
+/// SAUCE record data (Standard Architecture for Universal Comment Extensions)
+#[derive(Debug, Clone, Default)]
+struct SauceRecord {
+    title: String,
+    author: String,
+    group: String,
+    date: String,
+    width: u16,
+    height: u16,
+    comments: Vec<String>,
+    font: String,
+}
+
+impl SauceRecord {
+    /// Parse SAUCE record from bytes starting at "SAUCE00"
+    fn parse(data: &[u8], comnt_data: Option<&[u8]>) -> Option<Self> {
+        if data.len() < 128 || &data[0..5] != b"SAUCE" {
+            return None;
+        }
+
+        let mut record = SauceRecord::default();
+
+        // Parse fields using CP437 decoding, trimming trailing spaces/nulls
+        record.title = Self::decode_field(&data[7..42]);
+        record.author = Self::decode_field(&data[42..62]);
+        record.group = Self::decode_field(&data[62..82]);
+        record.date = Self::decode_field(&data[82..90]);
+
+        // TInfo1 = width, TInfo2 = height (little-endian u16)
+        record.width = u16::from_le_bytes([data[96], data[97]]);
+        record.height = u16::from_le_bytes([data[98], data[99]]);
+
+        // TInfoS = font name (22 bytes, null-terminated string)
+        record.font = Self::decode_field(&data[106..128]);
+
+        // Parse comments if COMNT block provided
+        if let Some(comnt) = comnt_data {
+            if comnt.len() >= 5 && &comnt[0..5] == b"COMNT" {
+                let comment_bytes = &comnt[5..];
+                // Each comment line is 64 bytes
+                for chunk in comment_bytes.chunks(64) {
+                    let line = Self::decode_field(chunk);
+                    if !line.is_empty() {
+                        record.comments.push(line);
+                    }
+                }
+            }
+        }
+
+        Some(record)
+    }
+
+    fn decode_field(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|&b| CP437_TO_UNICODE[b as usize])
+            .collect::<String>()
+            .trim_end_matches(|c: char| c == ' ' || c == '\0')
+            .to_string()
+    }
+
+    /// Format SAUCE record as "Key: Value\n" lines
+    fn format_output(&self) -> String {
+        let mut output = String::new();
+
+        if !self.title.is_empty() {
+            output.push_str(&format!("Title: {}\n", self.title));
+        }
+        if !self.author.is_empty() {
+            output.push_str(&format!("Author: {}\n", self.author));
+        }
+        if !self.group.is_empty() {
+            output.push_str(&format!("Group: {}\n", self.group));
+        }
+        if !self.date.is_empty() {
+            // Format date from CCYYMMDD to CCYY-MM-DD if valid
+            if self.date.len() == 8 && self.date.chars().all(|c| c.is_ascii_digit()) {
+                output.push_str(&format!(
+                    "Date: {}-{}-{}\n",
+                    &self.date[0..4],
+                    &self.date[4..6],
+                    &self.date[6..8]
+                ));
+            } else {
+                output.push_str(&format!("Date: {}\n", self.date));
+            }
+        }
+        if self.width > 0 || self.height > 0 {
+            output.push_str(&format!("Size: {}x{}\n", self.width, self.height));
+        }
+        if !self.font.is_empty() {
+            output.push_str(&format!("Font: {}\n", self.font));
+        }
+        for comment in &self.comments {
+            output.push_str(&format!("Comment: {}\n", comment));
+        }
+
+        output
+    }
+}
+
+/// Find SAUCE record position and COMNT block in data
+/// Returns (sauce_start, comnt_start, after_sauce_start)
+fn find_sauce_positions(data: &[u8]) -> (Option<usize>, Option<usize>, Option<usize>) {
+    // SAUCE is always 128 bytes from the end (if present)
+    // COMNT block (if present) is before SAUCE
+    let mut sauce_pos = None;
+    let mut comnt_pos = None;
+
+    // Search for SAUCE00 marker
+    if let Some(pos) = data
+        .windows(7)
+        .rposition(|w| w == b"SAUCE00")
+    {
+        sauce_pos = Some(pos);
+
+        // Look for COMNT before SAUCE (within reasonable range)
+        let search_start = pos.saturating_sub(64 * 256 + 5); // Max 255 comments * 64 bytes + "COMNT"
+        if let Some(rel_pos) = data[search_start..pos]
+            .windows(5)
+            .rposition(|w| w == b"COMNT")
+        {
+            comnt_pos = Some(search_start + rel_pos);
+        }
+    }
+
+    // Calculate position after SAUCE record
+    let after_sauce = sauce_pos.map(|pos| pos + 128);
+
+    (sauce_pos, comnt_pos, after_sauce)
 }
 
 /// Parser state for ANSI escape sequences
@@ -206,6 +343,7 @@ impl Converter {
             '>' => self.output.push_str("&gt;"),
             '&' => self.output.push_str("&amp;"),
             '"' => self.output.push_str("&quot;"),
+            '\'' => self.output.push_str("&apos;"),
             '\n' => {
                 self.output.push('\n');
                 self.current_column = 0;
@@ -588,8 +726,52 @@ impl Converter {
         self.output.push_str("<pre class=\"ansi\">");
         self.open_tag();
 
-        for &byte in input {
+        // Find SUB marker and SAUCE positions
+        let sub_pos = input.iter().position(|&b| b == 0x1A);
+        let (sauce_pos, comnt_pos, after_sauce_pos) = find_sauce_positions(input);
+
+        // Determine content end position
+        let content_end = sub_pos
+            .or(comnt_pos)
+            .or(sauce_pos)
+            .unwrap_or(input.len());
+
+        // Process content before SUB/SAUCE
+        for &byte in &input[..content_end] {
             self.process_byte(byte);
+        }
+
+        // If SAUCE record exists, parse and output it
+        if let Some(sauce_start) = sauce_pos {
+            let comnt_data = comnt_pos.map(|cp| &input[cp..sauce_start]);
+            if let Some(sauce) = SauceRecord::parse(&input[sauce_start..], comnt_data) {
+                let sauce_output = sauce.format_output();
+                if !sauce_output.is_empty() {
+                    // Add newline before SAUCE metadata
+                    self.emit_char('\n');
+                    for ch in sauce_output.chars() {
+                        self.emit_char(ch);
+                    }
+                }
+            }
+
+            // Check for content after SAUCE record
+            if let Some(after_pos) = after_sauce_pos {
+                if after_pos < input.len() {
+                    let remaining = &input[after_pos..];
+                    if !remaining.is_empty() && remaining.iter().any(|&b| b != 0 && b != 0x1A) {
+                        // Add newline separator before continuing content
+                        self.emit_char('\n');
+                        for &byte in remaining {
+                            if byte == 0x1A {
+                                // Another SUB - recursively handle nested SAUCE
+                                break;
+                            }
+                            self.process_byte(byte);
+                        }
+                    }
+                }
+            }
         }
 
         self.close_tag();
@@ -602,11 +784,53 @@ impl Converter {
         self.output.push_str("<pre class=\"ansi\">");
         self.open_tag();
 
-        // Parse as UTF-8, falling back to replacement char for invalid sequences
-        let text = String::from_utf8_lossy(input);
+        // Find SUB marker and SAUCE positions (work on raw bytes)
+        let sub_pos = input.iter().position(|&b| b == 0x1A);
+        let (sauce_pos, comnt_pos, after_sauce_pos) = find_sauce_positions(input);
 
-        for ch in text.chars() {
+        // Determine content end position
+        let content_end = sub_pos
+            .or(comnt_pos)
+            .or(sauce_pos)
+            .unwrap_or(input.len());
+
+        // Parse content as UTF-8
+        let content = String::from_utf8_lossy(&input[..content_end]);
+        for ch in content.chars() {
             self.process_utf8_char(ch);
+        }
+
+        // If SAUCE record exists, parse and output it
+        if let Some(sauce_start) = sauce_pos {
+            let comnt_data = comnt_pos.map(|cp| &input[cp..sauce_start]);
+            if let Some(sauce) = SauceRecord::parse(&input[sauce_start..], comnt_data) {
+                let sauce_output = sauce.format_output();
+                if !sauce_output.is_empty() {
+                    // Add newline before SAUCE metadata
+                    self.emit_char('\n');
+                    for ch in sauce_output.chars() {
+                        self.emit_char(ch);
+                    }
+                }
+            }
+
+            // Check for content after SAUCE record
+            if let Some(after_pos) = after_sauce_pos {
+                if after_pos < input.len() {
+                    let remaining = &input[after_pos..];
+                    if !remaining.is_empty() && remaining.iter().any(|&b| b != 0 && b != 0x1A) {
+                        // Add newline separator before continuing content
+                        self.emit_char('\n');
+                        let remaining_text = String::from_utf8_lossy(remaining);
+                        for ch in remaining_text.chars() {
+                            if ch == '\x1A' {
+                                break;
+                            }
+                            self.process_utf8_char(ch);
+                        }
+                    }
+                }
+            }
         }
 
         self.close_tag();
@@ -867,6 +1091,12 @@ mod tests {
     fn test_html_escaping() {
         let result = convert(b"<script>&</script>");
         assert!(result.contains("&lt;script&gt;&amp;&lt;/script&gt;"));
+        // Test double quote
+        let result = convert(b"\"quoted\"");
+        assert!(result.contains("&quot;quoted&quot;"));
+        // Test apostrophe
+        let result = convert(b"it's here");
+        assert!(result.contains("it&apos;s here"));
     }
 
     #[test]
@@ -1314,4 +1544,147 @@ mod tests {
         assert!(result.contains("<ans-02>")); // Green
         assert!(result.contains("Grün")); // German umlaut preserved
     }
+
+    // ========== SAUCE metadata parsing tests ==========
+
+    #[test]
+    fn test_sub_without_sauce_stops_processing() {
+        // SUB without valid SAUCE record - content after SUB is ignored
+        let input = b"Visible\x1aRandom garbage after SUB";
+        let result = convert(input);
+        assert!(result.contains("Visible"));
+        assert!(!result.contains("Random"));
+        assert!(!result.contains("garbage"));
+    }
+
+    #[test]
+    fn test_sauce_record_parsed_and_displayed() {
+        // Create a minimal valid SAUCE record (128 bytes)
+        let mut input = b"Content before SAUCE\x1a".to_vec();
+        // SAUCE00 header
+        input.extend_from_slice(b"SAUCE00");
+        // Title (35 bytes) - "Test Title" padded with spaces
+        input.extend_from_slice(b"Test Title                         ");
+        // Author (20 bytes)
+        input.extend_from_slice(b"Test Author         ");
+        // Group (20 bytes)
+        input.extend_from_slice(b"Test Group          ");
+        // Date (8 bytes) - CCYYMMDD
+        input.extend_from_slice(b"20240115");
+        // FileSize (4 bytes) - little endian
+        input.extend_from_slice(&[0, 0, 0, 0]);
+        // DataType (1 byte)
+        input.push(1);
+        // FileType (1 byte)
+        input.push(1);
+        // TInfo1-4 (8 bytes) - width=80, height=25
+        input.extend_from_slice(&[80, 0, 25, 0, 0, 0, 0, 0]);
+        // Comments (1 byte)
+        input.push(0);
+        // TFlags (1 byte)
+        input.push(0);
+        // TInfoS (22 bytes) - font name
+        input.extend_from_slice(b"IBM VGA\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+
+        let result = convert(&input);
+        assert!(result.contains("Content before SAUCE"));
+        assert!(result.contains("Title: Test Title"));
+        assert!(result.contains("Author: Test Author"));
+        assert!(result.contains("Group: Test Group"));
+        assert!(result.contains("Date: 2024-01-15"));
+        assert!(result.contains("Size: 80x25"));
+        assert!(result.contains("Font: IBM VGA"));
+    }
+
+    #[test]
+    fn test_sauce_with_comnt_block() {
+        // Create input with COMNT block before SAUCE
+        let mut input = b"Art content\x1a".to_vec();
+        // COMNT header + one 64-byte comment line
+        input.extend_from_slice(b"COMNT");
+        input.extend_from_slice(b"This is a comment line for the ANSI art.                       ");
+        // SAUCE00 header
+        input.extend_from_slice(b"SAUCE00");
+        // Title (35 bytes)
+        input.extend_from_slice(b"Artwork Title                      ");
+        // Author (20 bytes)
+        input.extend_from_slice(b"Artist              ");
+        // Group (20 bytes)
+        input.extend_from_slice(b"                    ");
+        // Date (8 bytes)
+        input.extend_from_slice(b"20230701");
+        // FileSize (4 bytes)
+        input.extend_from_slice(&[0, 0, 0, 0]);
+        // DataType, FileType
+        input.extend_from_slice(&[1, 1]);
+        // TInfo1-4 (8 bytes)
+        input.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
+        // Comments count (1 byte) - 1 comment
+        input.push(1);
+        // TFlags (1 byte)
+        input.push(0);
+        // TInfoS (22 bytes)
+        input.extend_from_slice(b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+
+        let result = convert(&input);
+        assert!(result.contains("Art content"));
+        assert!(result.contains("Title: Artwork Title"));
+        assert!(result.contains("Author: Artist"));
+        assert!(result.contains("Comment: This is a comment line for the ANSI art."));
+    }
+
+    #[test]
+    fn test_content_after_sauce_continues() {
+        // Create input with content after SAUCE record
+        let mut input = b"Before SAUCE\x1a".to_vec();
+        // Minimal SAUCE record (128 bytes)
+        input.extend_from_slice(b"SAUCE00");
+        input.extend_from_slice(b"Title                              "); // 35
+        input.extend_from_slice(b"                    "); // 20 author
+        input.extend_from_slice(b"                    "); // 20 group
+        input.extend_from_slice(b"        "); // 8 date
+        input.extend_from_slice(&[0u8; 4]); // filesize
+        input.extend_from_slice(&[0, 0]); // datatype, filetype
+        input.extend_from_slice(&[0u8; 8]); // tinfo1-4
+        input.push(0); // comments
+        input.push(0); // tflags
+        input.extend_from_slice(&[0u8; 22]); // tinfos
+        // Content after SAUCE
+        input.extend_from_slice(b"Content after SAUCE record");
+
+        let result = convert(&input);
+        assert!(result.contains("Before SAUCE"));
+        assert!(result.contains("Title: Title"));
+        assert!(result.contains("Content after SAUCE record"));
+    }
+
+    #[test]
+    fn test_sauce_utf8_mode() {
+        let options = ConvertOptions {
+            utf8_input: true,
+            ..Default::default()
+        };
+        // Create input with UTF-8 content and SAUCE
+        let mut input = b"Hello UTF-8 \xc3\xa9\x1a".to_vec(); // é in UTF-8
+        // Full SAUCE record (128 bytes total)
+        // SAUCE00 (7) + Title (35) + Author (20) + Group (20) + Date (8) +
+        // FileSize (4) + DataType (1) + FileType (1) + TInfo1-4 (8) +
+        // Comments (1) + TFlags (1) + TInfoS (22) = 128
+        input.extend_from_slice(b"SAUCE00");                           // 7 bytes
+        input.extend_from_slice(b"UTF-8 Test                         "); // 35 bytes
+        input.extend_from_slice(&[b' '; 20]);                          // 20 bytes author
+        input.extend_from_slice(&[b' '; 20]);                          // 20 bytes group
+        input.extend_from_slice(b"        ");                          // 8 bytes date
+        input.extend_from_slice(&[0u8; 4]);                            // 4 bytes filesize
+        input.extend_from_slice(&[1, 1]);                              // 2 bytes datatype, filetype
+        input.extend_from_slice(&[0u8; 8]);                            // 8 bytes tinfo1-4
+        input.push(0);                                                 // 1 byte comments
+        input.push(0);                                                 // 1 byte tflags
+        input.extend_from_slice(&[0u8; 22]);                           // 22 bytes tinfos
+
+        let result = convert_with_options(&input, &options);
+        assert!(result.contains("Hello UTF-8 é"));
+        assert!(result.contains("Title: UTF-8 Test"));
+    }
 }
+
