@@ -30,8 +30,10 @@
 //!     - `|08`-`|15`: High-intensity foreground colors
 //!     - `|16`-`|23`: Background colors
 //!
-//! - **HTML output**: Results are wrapped in `<pre class="ansi">` with `<ans-KF>` custom
-//!   elements where K is the background color (0-F) and F is the foreground color (0-F).
+//! - **HTML output**: Results are wrapped in `<pre class="ansi">` with custom elements:
+//!   - `<ans-KF>` - Standard 16-color CGA where K=background, F=foreground (hex 0-F)
+//!   - `<ans-256 fg="N" bg="N">` - 256-color mode (N=0-255, or "fg-#"/"bg-#" for CGA fallback)
+//!   - `<ans-rgb fg="R,G,B" bg="R,G,B">` - 24-bit RGB mode (or "fg-#"/"bg-#" for CGA fallback)
 //!
 //! - **Soft returns**: Lines containing ANSI/BBS sequences automatically wrap at column 80.
 //!
@@ -256,6 +258,35 @@ fn find_sauce_positions(data: &[u8]) -> (Option<usize>, Option<usize>, Option<us
     (sauce_pos, comnt_pos, after_sauce)
 }
 
+/// Extended color mode for 256-color and RGB support
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum ColorMode {
+    /// Standard 16-color CGA mode (uses <ans-KF> tags)
+    #[default]
+    Cga,
+    /// 256-color mode (uses <ans-256 fg="N" bg="N"> tags)
+    Color256,
+    /// 24-bit RGB mode (uses <ans-rgb fg="R,G,B" bg="R,G,B"> tags)
+    Rgb,
+}
+
+/// Extended color value (for 256-color and RGB modes)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExtendedColor {
+    /// CGA color fallback (0-15)
+    Cga(u8),
+    /// 256-color palette index (0-255)
+    Palette(u8),
+    /// 24-bit RGB color
+    Rgb(u8, u8, u8),
+}
+
+impl Default for ExtendedColor {
+    fn default() -> Self {
+        ExtendedColor::Cga(7) // Default to light gray
+    }
+}
+
 /// Parser state for ANSI escape sequences
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ParseState {
@@ -274,6 +305,12 @@ enum ParseState {
 struct Converter {
     foreground: u8,
     background: u8,
+    /// Extended foreground color (for 256-color and RGB modes)
+    ext_foreground: ExtendedColor,
+    /// Extended background color (for 256-color and RGB modes)
+    ext_background: ExtendedColor,
+    /// Current color mode
+    color_mode: ColorMode,
     output: String,
     current_column: u32,
     has_encountered_ansi: bool,
@@ -288,6 +325,9 @@ impl Converter {
         Self {
             foreground: 7,  // Light Gray
             background: 0,  // Black
+            ext_foreground: ExtendedColor::Cga(7),
+            ext_background: ExtendedColor::Cga(0),
+            color_mode: ColorMode::Cga,
             output: String::new(),
             current_column: 0,
             has_encountered_ansi: false,
@@ -306,23 +346,79 @@ impl Converter {
         }
     }
 
+    /// Format an extended color as a string attribute value
+    fn format_ext_color(color: &ExtendedColor, is_foreground: bool) -> String {
+        match color {
+            ExtendedColor::Cga(c) => {
+                let prefix = if is_foreground { "fg" } else { "bg" };
+                format!("{}-{}", prefix, Self::color_to_hex(*c))
+            }
+            ExtendedColor::Palette(n) => n.to_string(),
+            ExtendedColor::Rgb(r, g, b) => format!("{},{},{}", r, g, b),
+        }
+    }
+
     fn open_tag(&mut self) {
-        let bg = Self::color_to_hex(self.background);
-        let fg = Self::color_to_hex(self.foreground);
-        self.output.push_str(&format!("<ans-{}{}>", bg, fg));
+        match self.color_mode {
+            ColorMode::Cga => {
+                let bg = Self::color_to_hex(self.background);
+                let fg = Self::color_to_hex(self.foreground);
+                self.output.push_str(&format!("<ans-{}{}>", bg, fg));
+            }
+            ColorMode::Color256 => {
+                let fg = Self::format_ext_color(&self.ext_foreground, true);
+                let bg = Self::format_ext_color(&self.ext_background, false);
+                self.output.push_str(&format!("<ans-256 fg=\"{}\" bg=\"{}\">", fg, bg));
+            }
+            ColorMode::Rgb => {
+                let fg = Self::format_ext_color(&self.ext_foreground, true);
+                let bg = Self::format_ext_color(&self.ext_background, false);
+                self.output.push_str(&format!("<ans-rgb fg=\"{}\" bg=\"{}\">", fg, bg));
+            }
+        }
     }
 
     fn close_tag(&mut self) {
-        let bg = Self::color_to_hex(self.background);
-        let fg = Self::color_to_hex(self.foreground);
-        self.output.push_str(&format!("</ans-{}{}>", bg, fg));
+        match self.color_mode {
+            ColorMode::Cga => {
+                let bg = Self::color_to_hex(self.background);
+                let fg = Self::color_to_hex(self.foreground);
+                self.output.push_str(&format!("</ans-{}{}>", bg, fg));
+            }
+            ColorMode::Color256 => {
+                self.output.push_str("</ans-256>");
+            }
+            ColorMode::Rgb => {
+                self.output.push_str("</ans-rgb>");
+            }
+        }
+    }
+
+    /// Check if color state has changed (considering mode and extended colors)
+    fn colors_changed(&self, new_mode: ColorMode, new_bg: u8, new_fg: u8,
+                      new_ext_bg: ExtendedColor, new_ext_fg: ExtendedColor) -> bool {
+        if new_mode != self.color_mode {
+            return true;
+        }
+        match self.color_mode {
+            ColorMode::Cga => new_bg != self.background || new_fg != self.foreground,
+            ColorMode::Color256 | ColorMode::Rgb => {
+                new_ext_bg != self.ext_background || new_ext_fg != self.ext_foreground
+            }
+        }
     }
 
     fn switch_color(&mut self, new_bg: u8, new_fg: u8) {
-        if new_bg != self.background || new_fg != self.foreground {
+        // Stay in CGA mode
+        let new_ext_fg = ExtendedColor::Cga(new_fg);
+        let new_ext_bg = ExtendedColor::Cga(new_bg);
+        if self.colors_changed(ColorMode::Cga, new_bg, new_fg, new_ext_bg, new_ext_fg) {
             self.close_tag();
+            self.color_mode = ColorMode::Cga;
             self.background = new_bg;
             self.foreground = new_fg;
+            self.ext_foreground = new_ext_fg;
+            self.ext_background = new_ext_bg;
             self.open_tag();
         }
     }
@@ -359,9 +455,40 @@ impl Converter {
         }
     }
 
+    /// Map ANSI color code (0-7) to CGA color code
+    fn ansi_to_cga(ansi_color: u8) -> u8 {
+        match ansi_color {
+            0 => 0, // Black
+            1 => 4, // Red
+            2 => 2, // Green
+            3 => 6, // Brown/Yellow
+            4 => 1, // Blue
+            5 => 5, // Magenta
+            6 => 3, // Cyan
+            7 => 7, // White/Light Gray
+            _ => 7,
+        }
+    }
+
+    /// Map bright ANSI color code (0-7) to CGA bright color code (8-15)
+    fn ansi_to_cga_bright(ansi_color: u8) -> u8 {
+        match ansi_color {
+            0 => 8,  // Dark Gray
+            1 => 12, // Light Red
+            2 => 10, // Light Green
+            3 => 14, // Yellow
+            4 => 9,  // Light Blue
+            5 => 13, // Light Magenta
+            6 => 11, // Light Cyan
+            7 => 15, // White
+            _ => 15,
+        }
+    }
+
     fn process_sgr(&mut self, params: &str) {
         // SGR (Select Graphic Rendition) - handles color codes
-        let params: Vec<u8> = if params.is_empty() {
+        // Parse params as u16 to handle potential values > 255
+        let params: Vec<u16> = if params.is_empty() {
             vec![0]
         } else {
             params
@@ -370,116 +497,204 @@ impl Converter {
                 .collect()
         };
 
+        // Track pending state changes
         let mut new_fg = self.foreground;
         let mut new_bg = self.background;
+        let mut new_mode = self.color_mode;
+        let mut new_ext_fg = self.ext_foreground;
+        let mut new_ext_bg = self.ext_background;
 
         let mut i = 0;
         while i < params.len() {
             match params[i] {
                 0 => {
-                    // Reset
+                    // Reset - return to CGA mode with default colors
                     new_fg = 7;
                     new_bg = 0;
+                    new_mode = ColorMode::Cga;
+                    new_ext_fg = ExtendedColor::Cga(7);
+                    new_ext_bg = ExtendedColor::Cga(0);
                 }
                 1 => {
                     // Bold/Bright - set high bit on foreground
                     new_fg |= 0x08;
+                    // Also update extended color if it's CGA
+                    if let ExtendedColor::Cga(c) = new_ext_fg {
+                        new_ext_fg = ExtendedColor::Cga(c | 0x08);
+                    }
                 }
                 2 | 22 => {
                     // Dim / Normal intensity - clear high bit
                     new_fg &= 0x07;
+                    if let ExtendedColor::Cga(c) = new_ext_fg {
+                        new_ext_fg = ExtendedColor::Cga(c & 0x07);
+                    }
                 }
                 5 | 6 => {
                     // Blink - set high bit on background (in CGA terms)
                     new_bg |= 0x08;
+                    if let ExtendedColor::Cga(c) = new_ext_bg {
+                        new_ext_bg = ExtendedColor::Cga(c | 0x08);
+                    }
                 }
                 25 => {
                     // Blink off
                     new_bg &= 0x07;
+                    if let ExtendedColor::Cga(c) = new_ext_bg {
+                        new_ext_bg = ExtendedColor::Cga(c & 0x07);
+                    }
                 }
                 7 => {
                     // Reverse video
                     std::mem::swap(&mut new_fg, &mut new_bg);
+                    std::mem::swap(&mut new_ext_fg, &mut new_ext_bg);
                 }
                 30..=37 => {
-                    // Standard foreground colors
-                    let color = params[i] - 30;
-                    // Map ANSI colors to CGA: 0=black, 1=red, 2=green, 3=brown, 4=blue, 5=magenta, 6=cyan, 7=white
-                    let cga_color = match color {
-                        0 => 0, // Black
-                        1 => 4, // Red
-                        2 => 2, // Green
-                        3 => 6, // Brown/Yellow
-                        4 => 1, // Blue
-                        5 => 5, // Magenta
-                        6 => 3, // Cyan
-                        7 => 7, // White/Light Gray
-                        _ => 7,
-                    };
+                    // Standard foreground colors - switch to CGA mode
+                    let cga_color = Self::ansi_to_cga((params[i] - 30) as u8);
                     new_fg = (new_fg & 0x08) | cga_color;
+                    new_mode = ColorMode::Cga;
+                    new_ext_fg = ExtendedColor::Cga(new_fg);
+                }
+                38 => {
+                    // Extended foreground color
+                    if i + 1 < params.len() {
+                        match params[i + 1] {
+                            5 => {
+                                // 256-color mode: ESC[38;5;Nm
+                                if i + 2 < params.len() {
+                                    let index = params[i + 2] as u8;
+                                    new_mode = ColorMode::Color256;
+                                    new_ext_fg = ExtendedColor::Palette(index);
+                                    // Preserve background as CGA fallback if it was CGA
+                                    if matches!(self.ext_background, ExtendedColor::Cga(_)) {
+                                        new_ext_bg = ExtendedColor::Cga(new_bg);
+                                    }
+                                    i += 3;
+                                    continue;
+                                }
+                            }
+                            2 => {
+                                // RGB mode: ESC[38;2;R;G;Bm
+                                if i + 4 < params.len() {
+                                    let r = params[i + 2] as u8;
+                                    let g = params[i + 3] as u8;
+                                    let b = params[i + 4] as u8;
+                                    new_mode = ColorMode::Rgb;
+                                    new_ext_fg = ExtendedColor::Rgb(r, g, b);
+                                    // Preserve background as CGA fallback if it was CGA
+                                    if matches!(self.ext_background, ExtendedColor::Cga(_)) {
+                                        new_ext_bg = ExtendedColor::Cga(new_bg);
+                                    }
+                                    i += 5;
+                                    continue;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 39 => {
                     // Default foreground
                     new_fg = 7;
+                    new_ext_fg = ExtendedColor::Cga(7);
+                    new_mode = ColorMode::Cga;
                 }
                 40..=47 => {
-                    // Standard background colors
-                    let color = params[i] - 40;
-                    let cga_color = match color {
-                        0 => 0,
-                        1 => 4,
-                        2 => 2,
-                        3 => 6,
-                        4 => 1,
-                        5 => 5,
-                        6 => 3,
-                        7 => 7,
-                        _ => 0,
-                    };
+                    // Standard background colors - switch to CGA mode
+                    let cga_color = Self::ansi_to_cga((params[i] - 40) as u8);
                     new_bg = (new_bg & 0x08) | cga_color;
+                    new_mode = ColorMode::Cga;
+                    new_ext_bg = ExtendedColor::Cga(new_bg);
+                }
+                48 => {
+                    // Extended background color
+                    if i + 1 < params.len() {
+                        match params[i + 1] {
+                            5 => {
+                                // 256-color mode: ESC[48;5;Nm
+                                if i + 2 < params.len() {
+                                    let index = params[i + 2] as u8;
+                                    // Use 256-color if fg is already extended, otherwise use current mode
+                                    if matches!(new_ext_fg, ExtendedColor::Palette(_)) {
+                                        new_mode = ColorMode::Color256;
+                                    } else if matches!(new_ext_fg, ExtendedColor::Rgb(_, _, _)) {
+                                        // Keep RGB mode if fg is RGB
+                                    } else {
+                                        new_mode = ColorMode::Color256;
+                                    }
+                                    new_ext_bg = ExtendedColor::Palette(index);
+                                    // Preserve foreground as CGA fallback if it was CGA
+                                    if matches!(self.ext_foreground, ExtendedColor::Cga(_)) && matches!(new_ext_fg, ExtendedColor::Cga(_)) {
+                                        new_ext_fg = ExtendedColor::Cga(new_fg);
+                                    }
+                                    i += 3;
+                                    continue;
+                                }
+                            }
+                            2 => {
+                                // RGB mode: ESC[48;2;R;G;Bm
+                                if i + 4 < params.len() {
+                                    let r = params[i + 2] as u8;
+                                    let g = params[i + 3] as u8;
+                                    let b = params[i + 4] as u8;
+                                    // Use RGB mode if fg is already RGB, otherwise upgrade
+                                    if matches!(new_ext_fg, ExtendedColor::Rgb(_, _, _)) {
+                                        new_mode = ColorMode::Rgb;
+                                    } else if matches!(new_ext_fg, ExtendedColor::Palette(_)) {
+                                        // Keep 256-color mode if fg is 256
+                                        new_mode = ColorMode::Color256;
+                                    } else {
+                                        new_mode = ColorMode::Rgb;
+                                    }
+                                    new_ext_bg = ExtendedColor::Rgb(r, g, b);
+                                    // Preserve foreground as CGA fallback if it was CGA
+                                    if matches!(self.ext_foreground, ExtendedColor::Cga(_)) && matches!(new_ext_fg, ExtendedColor::Cga(_)) {
+                                        new_ext_fg = ExtendedColor::Cga(new_fg);
+                                    }
+                                    i += 5;
+                                    continue;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 49 => {
                     // Default background
                     new_bg = 0;
+                    new_ext_bg = ExtendedColor::Cga(0);
+                    new_mode = ColorMode::Cga;
                 }
                 90..=97 => {
-                    // Bright foreground colors
-                    let color = params[i] - 90;
-                    let cga_color = match color {
-                        0 => 8,  // Dark Gray
-                        1 => 12, // Light Red
-                        2 => 10, // Light Green
-                        3 => 14, // Yellow
-                        4 => 9,  // Light Blue
-                        5 => 13, // Light Magenta
-                        6 => 11, // Light Cyan
-                        7 => 15, // White
-                        _ => 15,
-                    };
+                    // Bright foreground colors - switch to CGA mode
+                    let cga_color = Self::ansi_to_cga_bright((params[i] - 90) as u8);
                     new_fg = cga_color;
+                    new_mode = ColorMode::Cga;
+                    new_ext_fg = ExtendedColor::Cga(new_fg);
                 }
                 100..=107 => {
-                    // Bright background colors
-                    let color = params[i] - 100;
-                    let cga_color = match color {
-                        0 => 8,
-                        1 => 12,
-                        2 => 10,
-                        3 => 14,
-                        4 => 9,
-                        5 => 13,
-                        6 => 11,
-                        7 => 15,
-                        _ => 8,
-                    };
+                    // Bright background colors - switch to CGA mode
+                    let cga_color = Self::ansi_to_cga_bright((params[i] - 100) as u8);
                     new_bg = cga_color;
+                    new_mode = ColorMode::Cga;
+                    new_ext_bg = ExtendedColor::Cga(new_bg);
                 }
                 _ => {}
             }
             i += 1;
         }
 
-        self.switch_color(new_bg, new_fg);
+        // Apply accumulated changes
+        if self.colors_changed(new_mode, new_bg, new_fg, new_ext_bg, new_ext_fg) {
+            self.close_tag();
+            self.color_mode = new_mode;
+            self.foreground = new_fg;
+            self.background = new_bg;
+            self.ext_foreground = new_ext_fg;
+            self.ext_background = new_ext_bg;
+            self.open_tag();
+        }
     }
 
     fn process_csi(&mut self, params: &str, command: char) {
@@ -531,52 +746,61 @@ impl Converter {
     }
 
     /// Process Synchronet Ctrl-A color code
+    ///
+    /// Synchronet color codes use:
+    /// - Lowercase letters (k,b,g,c,r,m,y,w) for foreground colors (0-7)
+    /// - Uppercase letters (K,B,G,C,R,M,Y,W) for background colors (0-7)
+    /// - h/H for high intensity modifier on foreground
+    /// - i/I for blink/high intensity modifier on background
     fn process_synchronet_code(&mut self, code: u8) {
         self.has_encountered_ansi = true;
         let mut new_fg = self.foreground;
         let mut new_bg = self.background;
 
         match code {
-            // Lowercase = normal intensity foreground
-            b'k' => new_fg = 0,  // Black
-            b'b' => new_fg = 1,  // Blue
-            b'g' => new_fg = 2,  // Green
-            b'c' => new_fg = 3,  // Cyan
-            b'r' => new_fg = 4,  // Red
-            b'm' => new_fg = 5,  // Magenta
-            b'y' => new_fg = 6,  // Brown/Yellow
-            b'w' => new_fg = 7,  // White/Light Gray
+            // Lowercase = foreground colors (sets base color, preserves intensity)
+            b'k' => new_fg = (new_fg & 0x08) | 0,  // Black
+            b'b' => new_fg = (new_fg & 0x08) | 1,  // Blue
+            b'g' => new_fg = (new_fg & 0x08) | 2,  // Green
+            b'c' => new_fg = (new_fg & 0x08) | 3,  // Cyan
+            b'r' => new_fg = (new_fg & 0x08) | 4,  // Red
+            b'm' => new_fg = (new_fg & 0x08) | 5,  // Magenta
+            b'y' => new_fg = (new_fg & 0x08) | 6,  // Brown/Yellow
+            b'w' => new_fg = (new_fg & 0x08) | 7,  // White/Light Gray
 
-            // Uppercase = high intensity foreground
-            b'K' => new_fg = 8,  // Dark Gray
-            b'B' => new_fg = 9,  // Light Blue
-            b'G' => new_fg = 10, // Light Green
-            b'C' => new_fg = 11, // Light Cyan
-            b'R' => new_fg = 12, // Light Red
-            b'M' => new_fg = 13, // Light Magenta
-            b'Y' => new_fg = 14, // Yellow
-            b'W' => new_fg = 15, // White
+            // Uppercase = background colors (sets base color, preserves intensity)
+            b'K' => new_bg = (new_bg & 0x08) | 0,  // Black
+            b'B' => new_bg = (new_bg & 0x08) | 1,  // Blue
+            b'G' => new_bg = (new_bg & 0x08) | 2,  // Green
+            b'C' => new_bg = (new_bg & 0x08) | 3,  // Cyan
+            b'R' => new_bg = (new_bg & 0x08) | 4,  // Red
+            b'M' => new_bg = (new_bg & 0x08) | 5,  // Magenta
+            b'Y' => new_bg = (new_bg & 0x08) | 6,  // Brown/Yellow
+            b'W' => new_bg = (new_bg & 0x08) | 7,  // White/Light Gray
 
-            // Background colors (0-7)
-            b'0' => new_bg = 0,  // Black
-            b'1' => new_bg = 1,  // Blue
-            b'2' => new_bg = 2,  // Green
-            b'3' => new_bg = 3,  // Cyan
-            b'4' => new_bg = 4,  // Red
-            b'5' => new_bg = 5,  // Magenta
-            b'6' => new_bg = 6,  // Brown
-            b'7' => new_bg = 7,  // White/Light Gray
+            // Digit codes (0-7) for background colors (legacy, sets base color)
+            b'0' => new_bg = (new_bg & 0x08) | 0,  // Black
+            b'1' => new_bg = (new_bg & 0x08) | 1,  // Blue
+            b'2' => new_bg = (new_bg & 0x08) | 2,  // Green
+            b'3' => new_bg = (new_bg & 0x08) | 3,  // Cyan
+            b'4' => new_bg = (new_bg & 0x08) | 4,  // Red
+            b'5' => new_bg = (new_bg & 0x08) | 5,  // Magenta
+            b'6' => new_bg = (new_bg & 0x08) | 6,  // Brown
+            b'7' => new_bg = (new_bg & 0x08) | 7,  // White/Light Gray
 
-            // Special codes
-            b'H' | b'h' => new_fg |= 0x08,  // High intensity
-            b'I' | b'i' => new_bg |= 0x08,  // Blink/high intensity background
+            // High intensity modifier for foreground
+            b'H' | b'h' => new_fg |= 0x08,
+            // Blink/high intensity modifier for background
+            b'I' | b'i' => new_bg |= 0x08,
+            // Normal - reset to default
             b'N' | b'n' => {
-                // Normal - reset to default
                 new_fg = 7;
                 new_bg = 0;
             }
-            b'-' => new_fg &= 0x07, // Remove high intensity from foreground
-            b'_' => new_bg &= 0x07, // Remove blink from background
+            // Remove high intensity from foreground
+            b'-' => new_fg &= 0x07,
+            // Remove blink from background
+            b'_' => new_bg &= 0x07,
 
             _ => {} // Unknown code, ignore
         }
@@ -584,7 +808,7 @@ impl Converter {
         self.switch_color(new_bg, new_fg);
     }
 
-    /// Process Renegade pipe color code (0-23)
+    /// Process Renegade pipe color code (0-31)
     fn process_renegade_code(&mut self, code: u8) {
         self.has_encountered_ansi = true;
         let mut new_fg = self.foreground;
@@ -611,7 +835,7 @@ impl Converter {
             14 => new_fg = 14, // Yellow
             15 => new_fg = 15, // White
 
-            // Background colors 16-23
+            // Background colors 16-23 (normal intensity)
             16 => new_bg = 0, // Black
             17 => new_bg = 1, // Blue
             18 => new_bg = 2, // Green
@@ -620,6 +844,16 @@ impl Converter {
             21 => new_bg = 5, // Magenta
             22 => new_bg = 6, // Brown
             23 => new_bg = 7, // Light Gray
+
+            // Background colors 24-31 (high intensity)
+            24 => new_bg = 8,  // Dark Gray
+            25 => new_bg = 9,  // Light Blue
+            26 => new_bg = 10, // Light Green
+            27 => new_bg = 11, // Light Cyan
+            28 => new_bg = 12, // Light Red
+            29 => new_bg = 13, // Light Magenta
+            30 => new_bg = 14, // Yellow
+            31 => new_bg = 15, // White
 
             _ => {} // Invalid code, ignore
         }
@@ -694,6 +928,10 @@ impl Converter {
             ParseState::RenegadePipe1 => {
                 if byte.is_ascii_digit() {
                     self.parse_state = ParseState::RenegadePipe2(byte - b'0');
+                } else if byte == b'|' {
+                    // Escaped pipe (||), emit literal pipe
+                    self.emit_char('|');
+                    self.parse_state = ParseState::Normal;
                 } else {
                     // Not a valid pipe code, emit the pipe and this character
                     self.emit_char('|');
@@ -705,10 +943,10 @@ impl Converter {
             ParseState::RenegadePipe2(first_digit) => {
                 if byte.is_ascii_digit() {
                     let code = first_digit * 10 + (byte - b'0');
-                    if code <= 23 {
+                    if code <= 31 {
                         self.process_renegade_code(code);
                     }
-                    // If code > 23, just ignore the sequence
+                    // If code > 31, just ignore the sequence
                 } else {
                     // Not a valid second digit, emit pipe + first digit and re-process
                     self.emit_char('|');
@@ -904,6 +1142,10 @@ impl Converter {
             ParseState::RenegadePipe1 => {
                 if ch.is_ascii_digit() {
                     self.parse_state = ParseState::RenegadePipe2(ch as u8 - b'0');
+                } else if ch == '|' {
+                    // Escaped pipe (||), emit literal pipe
+                    self.emit_char('|');
+                    self.parse_state = ParseState::Normal;
                 } else {
                     self.emit_char('|');
                     self.parse_state = ParseState::Normal;
@@ -913,7 +1155,7 @@ impl Converter {
             ParseState::RenegadePipe2(first_digit) => {
                 if ch.is_ascii_digit() {
                     let code = first_digit * 10 + (ch as u8 - b'0');
-                    if code <= 23 {
+                    if code <= 31 {
                         self.process_renegade_code(code);
                     }
                 } else {
@@ -1316,26 +1558,26 @@ mod tests {
             synchronet_ctrl_a: true,
             ..Default::default()
         };
-        // Ctrl-A + r = red foreground
+        // Ctrl-A + r (lowercase) = red foreground
         let input = b"\x01rRed Text";
         let result = convert_with_options(input, &options);
         assert!(result.contains("<ans-04>")); // Red on black
     }
 
     #[test]
-    fn test_synchronet_bright_foreground() {
+    fn test_synchronet_background_color_uppercase() {
         let options = ConvertOptions {
             synchronet_ctrl_a: true,
             ..Default::default()
         };
-        // Ctrl-A + R = bright red (Light Red)
-        let input = b"\x01RBright Red";
+        // Ctrl-A + R (uppercase) = red background
+        let input = b"\x01RRed BG";
         let result = convert_with_options(input, &options);
-        assert!(result.contains("<ans-0c>")); // Light Red on black
+        assert!(result.contains("<ans-47>")); // Red bg (4), Light Gray fg (7)
     }
 
     #[test]
-    fn test_synchronet_background_color() {
+    fn test_synchronet_background_color_digit() {
         let options = ConvertOptions {
             synchronet_ctrl_a: true,
             ..Default::default()
@@ -1347,15 +1589,27 @@ mod tests {
     }
 
     #[test]
-    fn test_synchronet_high_intensity() {
+    fn test_synchronet_high_intensity_foreground() {
         let options = ConvertOptions {
             synchronet_ctrl_a: true,
             ..Default::default()
         };
-        // Ctrl-A + H = high intensity on current color
-        let input = b"\x01b\x01HBright Blue";
+        // Ctrl-A + b (blue fg) + Ctrl-A + h (high intensity) = bright blue
+        let input = b"\x01b\x01hBright Blue";
         let result = convert_with_options(input, &options);
         assert!(result.contains("<ans-09>")); // Light Blue on black
+    }
+
+    #[test]
+    fn test_synchronet_high_intensity_background() {
+        let options = ConvertOptions {
+            synchronet_ctrl_a: true,
+            ..Default::default()
+        };
+        // Ctrl-A + B (blue bg) + Ctrl-A + i (blink/high intensity bg) = bright blue bg
+        let input = b"\x01B\x01iBright Blue BG";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-97>")); // Light Blue bg (9), Light Gray fg (7)
     }
 
     #[test]
@@ -1364,10 +1618,10 @@ mod tests {
             synchronet_ctrl_a: true,
             ..Default::default()
         };
-        // Ctrl-A + N = reset to normal
-        let input = b"\x01RRed\x01NNormal";
+        // Ctrl-A + r (red fg) then Ctrl-A + n = reset to normal
+        let input = b"\x01rRed\x01nNormal";
         let result = convert_with_options(input, &options);
-        assert!(result.contains("<ans-0c>Red</ans-0c>"));
+        assert!(result.contains("<ans-04>Red</ans-04>"));
         assert!(result.contains("<ans-07>Normal"));
     }
 
@@ -1378,6 +1632,54 @@ mod tests {
         let result = convert(input);
         assert!(result.contains('☺')); // CP437 0x01 = smiley face
         assert!(result.contains("rText"));
+    }
+
+    #[test]
+    fn test_synchronet_preserves_intensity() {
+        let options = ConvertOptions {
+            synchronet_ctrl_a: true,
+            ..Default::default()
+        };
+        // Set high intensity first, then change color - intensity should be preserved
+        let input = b"\x01h\x01bBright Blue";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-09>")); // Light Blue (high intensity preserved)
+    }
+
+    #[test]
+    fn test_synchronet_combined_fg_bg() {
+        let options = ConvertOptions {
+            synchronet_ctrl_a: true,
+            ..Default::default()
+        };
+        // Ctrl-A + w (white fg) + Ctrl-A + B (blue bg)
+        let input = b"\x01w\x01BWhite on Blue";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-17>")); // Blue bg (1), Light Gray fg (7)
+    }
+
+    #[test]
+    fn test_synchronet_intensity_idempotent() {
+        let options = ConvertOptions {
+            synchronet_ctrl_a: true,
+            ..Default::default()
+        };
+        // Applying high intensity multiple times should have same effect as once
+        let input = b"\x01b\x01h\x01hDouble High";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-09>")); // Light Blue (9), not something weird
+    }
+
+    #[test]
+    fn test_synchronet_blink_idempotent() {
+        let options = ConvertOptions {
+            synchronet_ctrl_a: true,
+            ..Default::default()
+        };
+        // Applying blink/high bg multiple times should have same effect as once
+        let input = b"\x01B\x01i\x01iDouble Blink BG";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-97>")); // Light Blue bg (9), Light Gray fg (7)
     }
 
     // ========== Renegade pipe code tests ==========
@@ -1685,6 +1987,173 @@ mod tests {
         let result = convert_with_options(&input, &options);
         assert!(result.contains("Hello UTF-8 é"));
         assert!(result.contains("Title: UTF-8 Test"));
+    }
+
+    // ========== 256-color and RGB support tests ==========
+
+    #[test]
+    fn test_256_color_foreground() {
+        // ESC[38;5;196m = 256-color foreground, color 196 (bright red in cube)
+        let input = b"\x1b[38;5;196mRed 256";
+        let result = convert(input);
+        assert!(result.contains("<ans-256 fg=\"196\" bg=\"bg-0\">"));
+        assert!(result.contains("Red 256"));
+        assert!(result.contains("</ans-256>"));
+    }
+
+    #[test]
+    fn test_256_color_background() {
+        // ESC[48;5;21m = 256-color background, color 21 (blue in cube)
+        let input = b"\x1b[48;5;21mBlue BG";
+        let result = convert(input);
+        assert!(result.contains("<ans-256 fg=\"fg-7\" bg=\"21\">"));
+        assert!(result.contains("Blue BG"));
+    }
+
+    #[test]
+    fn test_256_color_both() {
+        // ESC[38;5;226;48;5;21m = yellow fg (226) on blue bg (21)
+        let input = b"\x1b[38;5;226;48;5;21mYellow on Blue";
+        let result = convert(input);
+        assert!(result.contains("<ans-256 fg=\"226\" bg=\"21\">"));
+    }
+
+    #[test]
+    fn test_rgb_foreground() {
+        // ESC[38;2;255;128;0m = RGB foreground (orange)
+        let input = b"\x1b[38;2;255;128;0mOrange";
+        let result = convert(input);
+        assert!(result.contains("<ans-rgb fg=\"255,128,0\" bg=\"bg-0\">"));
+        assert!(result.contains("Orange"));
+        assert!(result.contains("</ans-rgb>"));
+    }
+
+    #[test]
+    fn test_rgb_background() {
+        // ESC[48;2;0;64;128m = RGB background (dark blue)
+        let input = b"\x1b[48;2;0;64;128mDark Blue BG";
+        let result = convert(input);
+        assert!(result.contains("<ans-rgb fg=\"fg-7\" bg=\"0,64,128\">"));
+        assert!(result.contains("Dark Blue BG"));
+    }
+
+    #[test]
+    fn test_rgb_both() {
+        // ESC[38;2;255;255;0;48;2;128;0;128m = yellow fg on purple bg
+        let input = b"\x1b[38;2;255;255;0;48;2;128;0;128mYellow on Purple";
+        let result = convert(input);
+        assert!(result.contains("<ans-rgb fg=\"255,255,0\" bg=\"128,0,128\">"));
+    }
+
+    #[test]
+    fn test_extended_color_reset() {
+        // Start with 256-color, then reset to default
+        let input = b"\x1b[38;5;196mRed\x1b[0mNormal";
+        let result = convert(input);
+        assert!(result.contains("<ans-256 fg=\"196\""));
+        assert!(result.contains("Red"));
+        assert!(result.contains("</ans-256>"));
+        assert!(result.contains("<ans-07>Normal"));
+    }
+
+    #[test]
+    fn test_switch_cga_to_256() {
+        // Start with CGA red, then switch to 256-color
+        let input = b"\x1b[31mCGA Red\x1b[38;5;196m256 Red";
+        let result = convert(input);
+        assert!(result.contains("<ans-04>CGA Red</ans-04>"));
+        assert!(result.contains("<ans-256 fg=\"196\""));
+        assert!(result.contains("256 Red"));
+    }
+
+    #[test]
+    fn test_switch_256_to_rgb() {
+        // Start with 256-color, then switch to RGB
+        let input = b"\x1b[38;5;196m256\x1b[38;2;255;0;0mRGB";
+        let result = convert(input);
+        assert!(result.contains("<ans-256"));
+        assert!(result.contains("256"));
+        assert!(result.contains("<ans-rgb fg=\"255,0,0\""));
+        assert!(result.contains("RGB"));
+    }
+
+    #[test]
+    fn test_256_color_cga_range() {
+        // 256-color palette indices 0-15 are the standard CGA colors
+        // Test index 4 (red in 256-color, which maps to CGA red)
+        let input = b"\x1b[38;5;4mBlue";
+        let result = convert(input);
+        assert!(result.contains("<ans-256 fg=\"4\""));
+    }
+
+    #[test]
+    fn test_256_color_grayscale() {
+        // Test grayscale colors (232-255)
+        let input = b"\x1b[38;5;240mGray";
+        let result = convert(input);
+        assert!(result.contains("<ans-256 fg=\"240\""));
+    }
+
+    // ========== Renegade escaped pipe tests ==========
+
+    #[test]
+    fn test_renegade_escaped_pipe() {
+        let options = ConvertOptions {
+            renegade_pipe: true,
+            ..Default::default()
+        };
+        // || should output a single | and continue
+        let input = b"||Hello";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("|Hello"));
+    }
+
+    #[test]
+    fn test_renegade_escaped_pipe_followed_by_digits() {
+        let options = ConvertOptions {
+            renegade_pipe: true,
+            ..Default::default()
+        };
+        // ||04 should output |04 (literal pipe followed by 04)
+        let input = b"||04Red";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("|04Red"));
+    }
+
+    #[test]
+    fn test_renegade_high_intensity_background() {
+        let options = ConvertOptions {
+            renegade_pipe: true,
+            ..Default::default()
+        };
+        // |24 = dark gray background (high intensity black)
+        let input = b"|24Dark Gray BG";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-87>")); // Dark Gray bg (8), Light Gray fg (7)
+    }
+
+    #[test]
+    fn test_renegade_high_intensity_background_range() {
+        let options = ConvertOptions {
+            renegade_pipe: true,
+            ..Default::default()
+        };
+        // |31 = white background (high intensity)
+        let input = b"|31White BG";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-f7>")); // White bg (f), Light Gray fg (7)
+    }
+
+    #[test]
+    fn test_renegade_combined_high_intensity_bg_with_fg() {
+        let options = ConvertOptions {
+            renegade_pipe: true,
+            ..Default::default()
+        };
+        // |00 = black fg, |28 = light red background
+        let input = b"|00|28Black on Light Red";
+        let result = convert_with_options(input, &options);
+        assert!(result.contains("<ans-c0>")); // Light Red bg (c), Black fg (0)
     }
 }
 

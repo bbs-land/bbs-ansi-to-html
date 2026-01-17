@@ -156,6 +156,26 @@ const enum ParseState {
 }
 
 /**
+ * Extended color mode for 256-color and RGB support.
+ */
+const enum ColorMode {
+  /** Standard 16-color CGA mode (uses <ans-KF> tags) */
+  Cga,
+  /** 256-color mode (uses <ans-256 fg="N" bg="N"> tags) */
+  Color256,
+  /** 24-bit RGB mode (uses <ans-rgb fg="R,G,B" bg="R,G,B"> tags) */
+  Rgb,
+}
+
+/**
+ * Extended color value (for 256-color and RGB modes).
+ */
+type ExtendedColor =
+  | { type: 'cga'; color: number }
+  | { type: 'palette'; index: number }
+  | { type: 'rgb'; r: number; g: number; b: number };
+
+/**
  * Map ANSI color code (0-7) to CGA color code.
  */
 function ansiToCga(ansiColor: number): number {
@@ -190,11 +210,47 @@ function ansiBrightToCga(ansiColor: number): number {
 }
 
 /**
+ * Format an extended color as a string attribute value.
+ */
+function formatExtColor(color: ExtendedColor, isForeground: boolean): string {
+  switch (color.type) {
+    case 'cga': {
+      const prefix = isForeground ? 'fg' : 'bg';
+      return `${prefix}-${colorToHex(color.color)}`;
+    }
+    case 'palette':
+      return String(color.index);
+    case 'rgb':
+      return `${color.r},${color.g},${color.b}`;
+  }
+}
+
+/**
+ * Check if two extended colors are equal.
+ */
+function extColorsEqual(a: ExtendedColor, b: ExtendedColor): boolean {
+  if (a.type !== b.type) return false;
+  switch (a.type) {
+    case 'cga':
+      return a.color === (b as { type: 'cga'; color: number }).color;
+    case 'palette':
+      return a.index === (b as { type: 'palette'; index: number }).index;
+    case 'rgb':
+      return a.r === (b as { type: 'rgb'; r: number; g: number; b: number }).r &&
+             a.g === (b as { type: 'rgb'; r: number; g: number; b: number }).g &&
+             a.b === (b as { type: 'rgb'; r: number; g: number; b: number }).b;
+  }
+}
+
+/**
  * Converter class that maintains state during conversion.
  */
 class Converter {
   private foreground = 7;  // Light Gray
   private background = 0;  // Black
+  private extForeground: ExtendedColor = { type: 'cga', color: 7 };
+  private extBackground: ExtendedColor = { type: 'cga', color: 0 };
+  private colorMode: ColorMode = ColorMode.Cga;
   private output = '';
   private currentColumn = 0;
   private hasEncounteredAnsi = false;
@@ -213,25 +269,79 @@ class Converter {
   }
 
   private openTag(): void {
-    const bg = colorToHex(this.background);
-    const fg = colorToHex(this.foreground);
-    this.output += `<ans-${bg}${fg}>`;
+    switch (this.colorMode) {
+      case ColorMode.Cga: {
+        const bg = colorToHex(this.background);
+        const fg = colorToHex(this.foreground);
+        this.output += `<ans-${bg}${fg}>`;
+        break;
+      }
+      case ColorMode.Color256: {
+        const fg = formatExtColor(this.extForeground, true);
+        const bg = formatExtColor(this.extBackground, false);
+        this.output += `<ans-256 fg="${fg}" bg="${bg}">`;
+        break;
+      }
+      case ColorMode.Rgb: {
+        const fg = formatExtColor(this.extForeground, true);
+        const bg = formatExtColor(this.extBackground, false);
+        this.output += `<ans-rgb fg="${fg}" bg="${bg}">`;
+        break;
+      }
+    }
   }
 
   private closeTag(): void {
-    const bg = colorToHex(this.background);
-    const fg = colorToHex(this.foreground);
-    this.output += `</ans-${bg}${fg}>`;
+    switch (this.colorMode) {
+      case ColorMode.Cga: {
+        const bg = colorToHex(this.background);
+        const fg = colorToHex(this.foreground);
+        this.output += `</ans-${bg}${fg}>`;
+        break;
+      }
+      case ColorMode.Color256:
+        this.output += '</ans-256>';
+        break;
+      case ColorMode.Rgb:
+        this.output += '</ans-rgb>';
+        break;
+    }
+  }
+
+  private colorsChanged(
+    newMode: ColorMode,
+    newBg: number,
+    newFg: number,
+    newExtBg: ExtendedColor,
+    newExtFg: ExtendedColor
+  ): boolean {
+    if (newMode !== this.colorMode) {
+      return true;
+    }
+    switch (this.colorMode) {
+      case ColorMode.Cga:
+        return newBg !== this.background || newFg !== this.foreground;
+      case ColorMode.Color256:
+      case ColorMode.Rgb:
+        return !extColorsEqual(newExtBg, this.extBackground) ||
+               !extColorsEqual(newExtFg, this.extForeground);
+    }
   }
 
   private switchColor(newBg: number, newFg: number): void {
-    if (newBg !== this.background || newFg !== this.foreground) {
+    const newExtFg: ExtendedColor = { type: 'cga', color: newFg };
+    const newExtBg: ExtendedColor = { type: 'cga', color: newBg };
+    if (this.colorsChanged(ColorMode.Cga, newBg, newFg, newExtBg, newExtFg)) {
       this.closeTag();
+      this.colorMode = ColorMode.Cga;
       this.background = newBg;
       this.foreground = newFg;
+      this.extForeground = newExtFg;
+      this.extBackground = newExtBg;
       this.openTag();
     }
   }
+
 
   private emitChar(ch: string): void {
     if (this.savePositionActive) {
@@ -283,70 +393,189 @@ class Converter {
   private processSgr(params: string): void {
     const codes = params === '' ? [0] : params.split(';').map(s => parseInt(s, 10) || 0);
 
+    // Track pending state changes
     let newFg = this.foreground;
     let newBg = this.background;
+    let newMode = this.colorMode;
+    let newExtFg = this.extForeground;
+    let newExtBg = this.extBackground;
 
-    for (const code of codes) {
+    let i = 0;
+    while (i < codes.length) {
+      const code = codes[i];
       switch (code) {
         case 0:
-          // Reset
+          // Reset - return to CGA mode with default colors
           newFg = 7;
           newBg = 0;
+          newMode = ColorMode.Cga;
+          newExtFg = { type: 'cga', color: 7 };
+          newExtBg = { type: 'cga', color: 0 };
           break;
         case 1:
           // Bold/Bright - set high bit on foreground
           newFg |= 0x08;
+          if (newExtFg.type === 'cga') {
+            newExtFg = { type: 'cga', color: newExtFg.color | 0x08 };
+          }
           break;
         case 2:
         case 22:
           // Dim / Normal intensity - clear high bit
           newFg &= 0x07;
+          if (newExtFg.type === 'cga') {
+            newExtFg = { type: 'cga', color: newExtFg.color & 0x07 };
+          }
           break;
         case 5:
         case 6:
           // Blink - set high bit on background (CGA style)
           newBg |= 0x08;
+          if (newExtBg.type === 'cga') {
+            newExtBg = { type: 'cga', color: newExtBg.color | 0x08 };
+          }
           break;
         case 25:
           // Blink off
           newBg &= 0x07;
+          if (newExtBg.type === 'cga') {
+            newExtBg = { type: 'cga', color: newExtBg.color & 0x07 };
+          }
           break;
         case 7:
           // Reverse video
           [newFg, newBg] = [newBg, newFg];
+          [newExtFg, newExtBg] = [newExtBg, newExtFg];
           break;
         case 30: case 31: case 32: case 33:
         case 34: case 35: case 36: case 37:
-          // Standard foreground colors
+          // Standard foreground colors - switch to CGA mode
           newFg = (newFg & 0x08) | ansiToCga(code - 30);
+          newMode = ColorMode.Cga;
+          newExtFg = { type: 'cga', color: newFg };
+          break;
+        case 38:
+          // Extended foreground color
+          if (i + 1 < codes.length) {
+            if (codes[i + 1] === 5 && i + 2 < codes.length) {
+              // 256-color mode: ESC[38;5;Nm
+              const index = codes[i + 2];
+              newMode = ColorMode.Color256;
+              newExtFg = { type: 'palette', index };
+              // Preserve background as CGA fallback if it was CGA
+              if (this.extBackground.type === 'cga') {
+                newExtBg = { type: 'cga', color: newBg };
+              }
+              i += 3;
+              continue;
+            } else if (codes[i + 1] === 2 && i + 4 < codes.length) {
+              // RGB mode: ESC[38;2;R;G;Bm
+              const r = codes[i + 2];
+              const g = codes[i + 3];
+              const b = codes[i + 4];
+              newMode = ColorMode.Rgb;
+              newExtFg = { type: 'rgb', r, g, b };
+              // Preserve background as CGA fallback if it was CGA
+              if (this.extBackground.type === 'cga') {
+                newExtBg = { type: 'cga', color: newBg };
+              }
+              i += 5;
+              continue;
+            }
+          }
           break;
         case 39:
           // Default foreground
           newFg = 7;
+          newExtFg = { type: 'cga', color: 7 };
+          newMode = ColorMode.Cga;
           break;
         case 40: case 41: case 42: case 43:
         case 44: case 45: case 46: case 47:
-          // Standard background colors
+          // Standard background colors - switch to CGA mode
           newBg = (newBg & 0x08) | ansiToCga(code - 40);
+          newMode = ColorMode.Cga;
+          newExtBg = { type: 'cga', color: newBg };
+          break;
+        case 48:
+          // Extended background color
+          if (i + 1 < codes.length) {
+            if (codes[i + 1] === 5 && i + 2 < codes.length) {
+              // 256-color mode: ESC[48;5;Nm
+              const index = codes[i + 2];
+              // Use 256-color if fg is already extended, otherwise use current mode
+              if (newExtFg.type === 'palette') {
+                newMode = ColorMode.Color256;
+              } else if (newExtFg.type === 'rgb') {
+                // Keep RGB mode if fg is RGB
+              } else {
+                newMode = ColorMode.Color256;
+              }
+              newExtBg = { type: 'palette', index };
+              // Preserve foreground as CGA fallback if it was CGA
+              if (this.extForeground.type === 'cga' && newExtFg.type === 'cga') {
+                newExtFg = { type: 'cga', color: newFg };
+              }
+              i += 3;
+              continue;
+            } else if (codes[i + 1] === 2 && i + 4 < codes.length) {
+              // RGB mode: ESC[48;2;R;G;Bm
+              const r = codes[i + 2];
+              const g = codes[i + 3];
+              const b = codes[i + 4];
+              // Use RGB mode if fg is already RGB, otherwise upgrade
+              if (newExtFg.type === 'rgb') {
+                newMode = ColorMode.Rgb;
+              } else if (newExtFg.type === 'palette') {
+                // Keep 256-color mode if fg is 256
+                newMode = ColorMode.Color256;
+              } else {
+                newMode = ColorMode.Rgb;
+              }
+              newExtBg = { type: 'rgb', r, g, b };
+              // Preserve foreground as CGA fallback if it was CGA
+              if (this.extForeground.type === 'cga' && newExtFg.type === 'cga') {
+                newExtFg = { type: 'cga', color: newFg };
+              }
+              i += 5;
+              continue;
+            }
+          }
           break;
         case 49:
           // Default background
           newBg = 0;
+          newExtBg = { type: 'cga', color: 0 };
+          newMode = ColorMode.Cga;
           break;
         case 90: case 91: case 92: case 93:
         case 94: case 95: case 96: case 97:
-          // Bright foreground colors
+          // Bright foreground colors - switch to CGA mode
           newFg = ansiBrightToCga(code - 90);
+          newMode = ColorMode.Cga;
+          newExtFg = { type: 'cga', color: newFg };
           break;
         case 100: case 101: case 102: case 103:
         case 104: case 105: case 106: case 107:
-          // Bright background colors
+          // Bright background colors - switch to CGA mode
           newBg = ansiBrightToCga(code - 100);
+          newMode = ColorMode.Cga;
+          newExtBg = { type: 'cga', color: newBg };
           break;
       }
+      i++;
     }
 
-    this.switchColor(newBg, newFg);
+    // Apply accumulated changes
+    if (this.colorsChanged(newMode, newBg, newFg, newExtBg, newExtFg)) {
+      this.closeTag();
+      this.colorMode = newMode;
+      this.foreground = newFg;
+      this.background = newBg;
+      this.extForeground = newExtFg;
+      this.extBackground = newExtBg;
+      this.openTag();
+    }
   }
 
   private processCsi(params: string, command: string): void {
@@ -399,6 +628,15 @@ class Converter {
     }
   }
 
+  /**
+   * Process Synchronet Ctrl-A color code
+   *
+   * Synchronet color codes use:
+   * - Lowercase letters (k,b,g,c,r,m,y,w) for foreground colors (0-7)
+   * - Uppercase letters (K,B,G,C,R,M,Y,W) for background colors (0-7)
+   * - h/H for high intensity modifier on foreground
+   * - i/I for blink/high intensity modifier on background
+   */
   private processSynchronetCode(code: number): void {
     this.hasEncounteredAnsi = true;
     let newFg = this.foreground;
@@ -406,56 +644,59 @@ class Converter {
 
     // Using character codes for comparison
     switch (code) {
-      // Lowercase = normal intensity foreground
-      case 0x6B: newFg = 0; break;  // 'k' - Black
-      case 0x62: newFg = 1; break;  // 'b' - Blue
-      case 0x67: newFg = 2; break;  // 'g' - Green
-      case 0x63: newFg = 3; break;  // 'c' - Cyan
-      case 0x72: newFg = 4; break;  // 'r' - Red
-      case 0x6D: newFg = 5; break;  // 'm' - Magenta
-      case 0x79: newFg = 6; break;  // 'y' - Brown/Yellow
-      case 0x77: newFg = 7; break;  // 'w' - White/Light Gray
+      // Lowercase = foreground colors (sets base color, preserves intensity)
+      case 0x6B: newFg = (newFg & 0x08) | 0; break;  // 'k' - Black
+      case 0x62: newFg = (newFg & 0x08) | 1; break;  // 'b' - Blue
+      case 0x67: newFg = (newFg & 0x08) | 2; break;  // 'g' - Green
+      case 0x63: newFg = (newFg & 0x08) | 3; break;  // 'c' - Cyan
+      case 0x72: newFg = (newFg & 0x08) | 4; break;  // 'r' - Red
+      case 0x6D: newFg = (newFg & 0x08) | 5; break;  // 'm' - Magenta
+      case 0x79: newFg = (newFg & 0x08) | 6; break;  // 'y' - Brown/Yellow
+      case 0x77: newFg = (newFg & 0x08) | 7; break;  // 'w' - White/Light Gray
 
-      // Uppercase = high intensity foreground
-      case 0x4B: newFg = 8; break;  // 'K' - Dark Gray
-      case 0x42: newFg = 9; break;  // 'B' - Light Blue
-      case 0x47: newFg = 10; break; // 'G' - Light Green
-      case 0x43: newFg = 11; break; // 'C' - Light Cyan
-      case 0x52: newFg = 12; break; // 'R' - Light Red
-      case 0x4D: newFg = 13; break; // 'M' - Light Magenta
-      case 0x59: newFg = 14; break; // 'Y' - Yellow
-      case 0x57: newFg = 15; break; // 'W' - White
+      // Uppercase = background colors (sets base color, preserves intensity)
+      case 0x4B: newBg = (newBg & 0x08) | 0; break;  // 'K' - Black
+      case 0x42: newBg = (newBg & 0x08) | 1; break;  // 'B' - Blue
+      case 0x47: newBg = (newBg & 0x08) | 2; break;  // 'G' - Green
+      case 0x43: newBg = (newBg & 0x08) | 3; break;  // 'C' - Cyan
+      case 0x52: newBg = (newBg & 0x08) | 4; break;  // 'R' - Red
+      case 0x4D: newBg = (newBg & 0x08) | 5; break;  // 'M' - Magenta
+      case 0x59: newBg = (newBg & 0x08) | 6; break;  // 'Y' - Brown/Yellow
+      case 0x57: newBg = (newBg & 0x08) | 7; break;  // 'W' - White/Light Gray
 
-      // Background colors (0-7)
-      case 0x30: newBg = 0; break;  // '0' - Black
-      case 0x31: newBg = 1; break;  // '1' - Blue
-      case 0x32: newBg = 2; break;  // '2' - Green
-      case 0x33: newBg = 3; break;  // '3' - Cyan
-      case 0x34: newBg = 4; break;  // '4' - Red
-      case 0x35: newBg = 5; break;  // '5' - Magenta
-      case 0x36: newBg = 6; break;  // '6' - Brown
-      case 0x37: newBg = 7; break;  // '7' - White/Light Gray
+      // Digit codes (0-7) for background colors (legacy, sets base color)
+      case 0x30: newBg = (newBg & 0x08) | 0; break;  // '0' - Black
+      case 0x31: newBg = (newBg & 0x08) | 1; break;  // '1' - Blue
+      case 0x32: newBg = (newBg & 0x08) | 2; break;  // '2' - Green
+      case 0x33: newBg = (newBg & 0x08) | 3; break;  // '3' - Cyan
+      case 0x34: newBg = (newBg & 0x08) | 4; break;  // '4' - Red
+      case 0x35: newBg = (newBg & 0x08) | 5; break;  // '5' - Magenta
+      case 0x36: newBg = (newBg & 0x08) | 6; break;  // '6' - Brown
+      case 0x37: newBg = (newBg & 0x08) | 7; break;  // '7' - White/Light Gray
 
-      // Special codes
+      // High intensity modifier for foreground
       case 0x48: // 'H'
       case 0x68: // 'h'
-        newFg |= 0x08; // High intensity
+        newFg |= 0x08;
         break;
+      // Blink/high intensity modifier for background
       case 0x49: // 'I'
       case 0x69: // 'i'
-        newBg |= 0x08; // Blink/high intensity background
+        newBg |= 0x08;
         break;
+      // Normal - reset to default
       case 0x4E: // 'N'
       case 0x6E: // 'n'
-        // Normal - reset to default
         newFg = 7;
         newBg = 0;
         break;
+      // Remove high intensity from foreground
       case 0x2D: // '-'
-        newFg &= 0x07; // Remove high intensity from foreground
+        newFg &= 0x07;
         break;
+      // Remove blink from background
       case 0x5F: // '_'
-        newBg &= 0x07; // Remove blink from background
+        newBg &= 0x07;
         break;
     }
 
@@ -471,8 +712,11 @@ class Converter {
       // Foreground colors 0-15
       newFg = code;
     } else if (code >= 16 && code <= 23) {
-      // Background colors 16-23
+      // Background colors 16-23 (normal intensity)
       newBg = code - 16;
+    } else if (code >= 24 && code <= 31) {
+      // Background colors 24-31 (high intensity)
+      newBg = code - 16; // 24->8, 25->9, ..., 31->15
     }
 
     this.switchColor(newBg, newFg);
@@ -539,6 +783,9 @@ class Converter {
         if (charCode >= 0x30 && charCode <= 0x39) {
           this.renegadeFirstDigit = charCode - 0x30;
           this.parseState = ParseState.RenegadePipe2;
+        } else if (charCode === 0x7C) { // '|' - escaped pipe, emit literal pipe
+          this.emitChar('|');
+          this.parseState = ParseState.Normal;
         } else {
           this.emitChar('|');
           this.parseState = ParseState.Normal;
@@ -549,10 +796,10 @@ class Converter {
       case ParseState.RenegadePipe2:
         if (charCode >= 0x30 && charCode <= 0x39) {
           const code = this.renegadeFirstDigit * 10 + (charCode - 0x30);
-          if (code <= 23) {
+          if (code <= 31) {
             this.processRenegadeCode(code);
           }
-          // If code > 23, just ignore the sequence
+          // If code > 31, just ignore the sequence
         } else {
           this.emitChar('|');
           this.emitChar(String.fromCharCode(0x30 + this.renegadeFirstDigit));
@@ -629,6 +876,9 @@ class Converter {
         if (code >= 0x30 && code <= 0x39) {
           this.renegadeFirstDigit = code - 0x30;
           this.parseState = ParseState.RenegadePipe2;
+        } else if (ch === '|') { // Escaped pipe, emit literal pipe
+          this.emitChar('|');
+          this.parseState = ParseState.Normal;
         } else {
           this.emitChar('|');
           this.parseState = ParseState.Normal;
@@ -639,7 +889,7 @@ class Converter {
       case ParseState.RenegadePipe2:
         if (code >= 0x30 && code <= 0x39) {
           const pipeCode = this.renegadeFirstDigit * 10 + (code - 0x30);
-          if (pipeCode <= 23) {
+          if (pipeCode <= 31) {
             this.processRenegadeCode(pipeCode);
           }
         } else {

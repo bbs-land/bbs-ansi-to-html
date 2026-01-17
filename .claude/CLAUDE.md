@@ -87,8 +87,8 @@ Core library for converting CP437 byte arrays with ANSI/BBS escape sequences to 
   - Cursor forward (`ESC[C`, `ESC[nC`) - emits n space characters
   - Save/restore cursor position (`ESC[s`/`ESC[u` and `ESC7`/`ESC8`) - collapses text between
 - **BBS color code support** (optional, via `ConvertOptions`):
-  - **Synchronet Ctrl-A codes**: `^Ar` (red), `^AR` (bright red), `^A1` (blue background), `^AH` (high intensity), `^AN` (reset)
-  - **Renegade pipe codes**: `|00`-`|07` (foreground), `|08`-`|15` (bright), `|16`-`|23` (background)
+  - **Synchronet Ctrl-A codes**: `^Ar` (red fg), `^AR` (red bg), `^A1` (blue background), `^Ah` (high intensity fg), `^Ai` (blink/high bg), `^An` (reset)
+  - **Renegade pipe codes**: `|00`-`|07` (foreground), `|08`-`|15` (bright fg), `|16`-`|23` (background), `|24`-`|31` (bright bg), `||` (escaped pipe)
 - **Soft line wrapping**: Lines with ANSI sequences wrap at column 80
 - **UTF-8 input mode** (optional, via `ConvertOptions`): Treats input as UTF-8 instead of CP437, only converting control characters (< 0x20)
 - **SAUCE metadata handling**: Parses SAUCE/COMNT records and displays metadata as `Key: Value` lines (Title, Author, Group, Date, Size, Font, Comment). Content after SAUCE records continues to be processed.
@@ -229,13 +229,18 @@ The `wwwroot/` directory at the project root is shared across all implementation
 
 ### Synchronet Ctrl-A Codes
 
+Synchronet uses Ctrl-A (0x01) followed by a character. Case is significant:
+
 | Code | Effect |
 |------|--------|
-| `^Ak`-`^Aw` | Foreground colors (black, blue, green, cyan, red, magenta, yellow, white) |
-| `^AK`-`^AW` | Bright foreground colors |
-| `^A0`-`^A7` | Background colors |
-| `^AH` | High intensity (bright) |
-| `^AN` | Normal (reset) |
+| `^Ak`-`^Aw` | Lowercase = foreground colors (black, blue, green, cyan, red, magenta, yellow, white) |
+| `^AK`-`^AW` | Uppercase = background colors (black, blue, green, cyan, red, magenta, yellow, white) |
+| `^A0`-`^A7` | Background colors (legacy digit codes) |
+| `^Ah`/`^AH` | High intensity modifier for foreground (adds 0x08) |
+| `^Ai`/`^AI` | Blink/high intensity modifier for background (adds 0x08) |
+| `^An`/`^AN` | Normal (reset to default colors) |
+| `^A-` | Remove high intensity from foreground |
+| `^A_` | Remove blink from background |
 
 ### Renegade Pipe Codes
 
@@ -243,7 +248,9 @@ The `wwwroot/` directory at the project root is shared across all implementation
 |------|--------|
 | `\|00`-`\|07` | Normal foreground colors |
 | `\|08`-`\|15` | Bright foreground colors |
-| `\|16`-`\|23` | Background colors |
+| `\|16`-`\|23` | Background colors (normal intensity) |
+| `\|24`-`\|31` | Background colors (high intensity) |
+| `\|\|` | Literal pipe character (escaped) |
 
 ## License
 

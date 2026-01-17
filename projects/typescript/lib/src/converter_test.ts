@@ -127,23 +127,23 @@ Deno.test('ansiToHtml - does not add soft return without ANSI', () => {
 });
 
 // Synchronet Ctrl-A codes tests
-Deno.test('Synchronet - handles foreground colors', () => {
+Deno.test('Synchronet - handles foreground colors (lowercase)', () => {
   const syncOptions: ConvertOptions = { synchronetCtrlA: true };
-  // Ctrl-A + r = red foreground
+  // Ctrl-A + r (lowercase) = red foreground
   const input = '\x01rRed Text';
   const result = ansiToHtml(input, syncOptions);
   assertStringIncludes(result, '<ans-04>'); // Red on black
 });
 
-Deno.test('Synchronet - handles bright foreground', () => {
+Deno.test('Synchronet - handles background colors (uppercase)', () => {
   const syncOptions: ConvertOptions = { synchronetCtrlA: true };
-  // Ctrl-A + R = bright red (Light Red)
-  const input = '\x01RBright Red';
+  // Ctrl-A + R (uppercase) = red background
+  const input = '\x01RRed BG';
   const result = ansiToHtml(input, syncOptions);
-  assertStringIncludes(result, '<ans-0c>'); // Light Red on black
+  assertStringIncludes(result, '<ans-47>'); // Red bg (4), Light Gray fg (7)
 });
 
-Deno.test('Synchronet - handles background color', () => {
+Deno.test('Synchronet - handles background color (digit)', () => {
   const syncOptions: ConvertOptions = { synchronetCtrlA: true };
   // Ctrl-A + 1 = blue background
   const input = '\x011Blue BG';
@@ -151,12 +151,28 @@ Deno.test('Synchronet - handles background color', () => {
   assertStringIncludes(result, '<ans-17>'); // Blue bg, Light Gray fg
 });
 
+Deno.test('Synchronet - handles high intensity foreground', () => {
+  const syncOptions: ConvertOptions = { synchronetCtrlA: true };
+  // Ctrl-A + b (blue fg) + Ctrl-A + h (high intensity) = bright blue
+  const input = '\x01b\x01hBright Blue';
+  const result = ansiToHtml(input, syncOptions);
+  assertStringIncludes(result, '<ans-09>'); // Light Blue on black
+});
+
+Deno.test('Synchronet - handles high intensity background', () => {
+  const syncOptions: ConvertOptions = { synchronetCtrlA: true };
+  // Ctrl-A + B (blue bg) + Ctrl-A + i (blink/high intensity bg) = bright blue bg
+  const input = '\x01B\x01iBright Blue BG';
+  const result = ansiToHtml(input, syncOptions);
+  assertStringIncludes(result, '<ans-97>'); // Light Blue bg (9), Light Gray fg (7)
+});
+
 Deno.test('Synchronet - handles normal reset', () => {
   const syncOptions: ConvertOptions = { synchronetCtrlA: true };
-  // Ctrl-A + N = reset to normal
-  const input = '\x01RRed\x01NNormal';
+  // Ctrl-A + r (red fg) then Ctrl-A + n = reset to normal
+  const input = '\x01rRed\x01nNormal';
   const result = ansiToHtml(input, syncOptions);
-  assertStringIncludes(result, '<ans-0c>Red</ans-0c>');
+  assertStringIncludes(result, '<ans-04>Red</ans-04>');
   assertStringIncludes(result, '<ans-07>Normal');
 });
 
@@ -166,6 +182,38 @@ Deno.test('Synchronet - is disabled by default', () => {
   const result = ansiToHtml(input);
   assertStringIncludes(result, '☺'); // CP437 0x01 = smiley face
   assertStringIncludes(result, 'rText');
+});
+
+Deno.test('Synchronet - preserves intensity when changing color', () => {
+  const syncOptions: ConvertOptions = { synchronetCtrlA: true };
+  // Set high intensity first, then change color - intensity should be preserved
+  const input = '\x01h\x01bBright Blue';
+  const result = ansiToHtml(input, syncOptions);
+  assertStringIncludes(result, '<ans-09>'); // Light Blue (high intensity preserved)
+});
+
+Deno.test('Synchronet - combined foreground and background', () => {
+  const syncOptions: ConvertOptions = { synchronetCtrlA: true };
+  // Ctrl-A + w (white fg) + Ctrl-A + B (blue bg)
+  const input = '\x01w\x01BWhite on Blue';
+  const result = ansiToHtml(input, syncOptions);
+  assertStringIncludes(result, '<ans-17>'); // Blue bg (1), Light Gray fg (7)
+});
+
+Deno.test('Synchronet - high intensity is idempotent', () => {
+  const syncOptions: ConvertOptions = { synchronetCtrlA: true };
+  // Applying high intensity multiple times should have same effect as once
+  const input = '\x01b\x01h\x01hDouble High';
+  const result = ansiToHtml(input, syncOptions);
+  assertStringIncludes(result, '<ans-09>'); // Light Blue (9), not something weird
+});
+
+Deno.test('Synchronet - blink is idempotent', () => {
+  const syncOptions: ConvertOptions = { synchronetCtrlA: true };
+  // Applying blink/high bg multiple times should have same effect as once
+  const input = '\x01B\x01i\x01iDouble Blink BG';
+  const result = ansiToHtml(input, syncOptions);
+  assertStringIncludes(result, '<ans-97>'); // Light Blue bg (9), Light Gray fg (7)
 });
 
 // Renegade pipe codes tests
@@ -353,3 +401,139 @@ Deno.test('SAUCE UTF-8 mode', () => {
 // Tests for generation were removed because the library no longer emits
 // CSS/JS at runtime; web projects should load `/style.css` and
 // `/ansi-display.js` from their public directory.
+
+// ========== 256-color and RGB support tests ==========
+
+Deno.test('256-color - handles foreground', () => {
+  // ESC[38;5;196m = 256-color foreground, color 196 (bright red in cube)
+  const input = '\x1b[38;5;196mRed 256';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256 fg="196" bg="bg-0">');
+  assertStringIncludes(result, 'Red 256');
+  assertStringIncludes(result, '</ans-256>');
+});
+
+Deno.test('256-color - handles background', () => {
+  // ESC[48;5;21m = 256-color background, color 21 (blue in cube)
+  const input = '\x1b[48;5;21mBlue BG';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256 fg="fg-7" bg="21">');
+  assertStringIncludes(result, 'Blue BG');
+});
+
+Deno.test('256-color - handles both fg and bg', () => {
+  // ESC[38;5;226;48;5;21m = yellow fg (226) on blue bg (21)
+  const input = '\x1b[38;5;226;48;5;21mYellow on Blue';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256 fg="226" bg="21">');
+});
+
+Deno.test('RGB - handles foreground', () => {
+  // ESC[38;2;255;128;0m = RGB foreground (orange)
+  const input = '\x1b[38;2;255;128;0mOrange';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-rgb fg="255,128,0" bg="bg-0">');
+  assertStringIncludes(result, 'Orange');
+  assertStringIncludes(result, '</ans-rgb>');
+});
+
+Deno.test('RGB - handles background', () => {
+  // ESC[48;2;0;64;128m = RGB background (dark blue)
+  const input = '\x1b[48;2;0;64;128mDark Blue BG';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-rgb fg="fg-7" bg="0,64,128">');
+  assertStringIncludes(result, 'Dark Blue BG');
+});
+
+Deno.test('RGB - handles both fg and bg', () => {
+  // ESC[38;2;255;255;0;48;2;128;0;128m = yellow fg on purple bg
+  const input = '\x1b[38;2;255;255;0;48;2;128;0;128mYellow on Purple';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-rgb fg="255,255,0" bg="128,0,128">');
+});
+
+Deno.test('Extended color - reset to CGA', () => {
+  // Start with 256-color, then reset to default
+  const input = '\x1b[38;5;196mRed\x1b[0mNormal';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256 fg="196"');
+  assertStringIncludes(result, 'Red');
+  assertStringIncludes(result, '</ans-256>');
+  assertStringIncludes(result, '<ans-07>Normal');
+});
+
+Deno.test('Extended color - switch CGA to 256', () => {
+  // Start with CGA red, then switch to 256-color
+  const input = '\x1b[31mCGA Red\x1b[38;5;196m256 Red';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-04>CGA Red</ans-04>');
+  assertStringIncludes(result, '<ans-256 fg="196"');
+  assertStringIncludes(result, '256 Red');
+});
+
+Deno.test('Extended color - switch 256 to RGB', () => {
+  // Start with 256-color, then switch to RGB
+  const input = '\x1b[38;5;196m256\x1b[38;2;255;0;0mRGB';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256');
+  assertStringIncludes(result, '256');
+  assertStringIncludes(result, '<ans-rgb fg="255,0,0"');
+  assertStringIncludes(result, 'RGB');
+});
+
+Deno.test('256-color - handles CGA range', () => {
+  // 256-color palette indices 0-15 are the standard CGA colors
+  // Test index 4 (blue in 256-color palette)
+  const input = '\x1b[38;5;4mBlue';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256 fg="4"');
+});
+
+Deno.test('256-color - handles grayscale', () => {
+  // Test grayscale colors (232-255)
+  const input = '\x1b[38;5;240mGray';
+  const result = ansiToHtml(input);
+  assertStringIncludes(result, '<ans-256 fg="240"');
+});
+
+// ========== Renegade escaped pipe tests ==========
+
+Deno.test('Renegade - escaped pipe outputs literal pipe', () => {
+  const renegadeOptions: ConvertOptions = { renegadePipe: true };
+  // || should output a single | and continue
+  const input = '||Hello';
+  const result = ansiToHtml(input, renegadeOptions);
+  assertStringIncludes(result, '|Hello');
+});
+
+Deno.test('Renegade - escaped pipe followed by digits', () => {
+  const renegadeOptions: ConvertOptions = { renegadePipe: true };
+  // ||04 should output |04 (literal pipe followed by 04)
+  const input = '||04Red';
+  const result = ansiToHtml(input, renegadeOptions);
+  assertStringIncludes(result, '|04Red');
+});
+
+Deno.test('Renegade - high intensity background colors', () => {
+  const renegadeOptions: ConvertOptions = { renegadePipe: true };
+  // |24 = dark gray background (high intensity black)
+  const input = '|24Dark Gray BG';
+  const result = ansiToHtml(input, renegadeOptions);
+  assertStringIncludes(result, '<ans-87>'); // Dark Gray bg (8), Light Gray fg (7)
+});
+
+Deno.test('Renegade - high intensity background colors range', () => {
+  const renegadeOptions: ConvertOptions = { renegadePipe: true };
+  // |31 = white background (high intensity)
+  const input = '|31White BG';
+  const result = ansiToHtml(input, renegadeOptions);
+  assertStringIncludes(result, '<ans-f7>'); // White bg (f), Light Gray fg (7)
+});
+
+Deno.test('Renegade - combined high intensity bg with fg', () => {
+  const renegadeOptions: ConvertOptions = { renegadePipe: true };
+  // |00 = black fg, |28 = light red background
+  const input = '|00|28Black on Light Red';
+  const result = ansiToHtml(input, renegadeOptions);
+  assertStringIncludes(result, '<ans-c0>'); // Light Red bg (c), Black fg (0)
+});
